@@ -1,26 +1,43 @@
 {
   "_comment": [
-    "風場模型參數覆寫檔。改這裡即可，不必改程式；重跑分析就會生效。",
+    "模型參數。改這裡即可，不必改程式；重跑分析就會生效。",
+    "網站使用者也可以透過 /api/conditions 的查詢字串即時覆寫",
+    "（targetPowerW、massKg、cdaM2、crr、maxSpeedKmh、k_riverside 等）。",
     "",
-    "exposureK = 騎士實際感受到的風速 / 模式給的開闊地 10 m 風速。",
+    "疊加順序：內建預設 < rider-profile.json（校正輸出）< 本檔 < 查詢字串。",
+    "massKg / cdaM2 / crr 以本檔為權威 —— rider-profile.json 是校正腳本的輸出，",
+    "重跑校正時會被覆寫，不適合當權威來源。",
+    "",
+    "exposureK = 騎士實際感受到的風速 / 模式給的開闊地 10 m 風速：",
     "  riverside 1.0  堤內開闊地即開闊地本身，不折減",
     "  urban     0.3  市區街廓，建物遮蔽",
     "  mountain  0.0  山區風的影響視為可忽略",
     "",
-    "重要性質（見 docs 或 scripts/sweep-exposure.mjs）：",
-    "  方向判斷只取決於這三個值的「差值」，整體加減常數不影響結果；",
-    "  整體等比放大會放大 ΔW 的大小但不改變正負號。",
-    "  三者相等時方向偏好完全消失。"
+    "重要性質：方向判斷只取決於這三個值的「差值」。整體加減常數不影響結果，",
+    "整體等比放大只改變差距量值、不改變建議方向；三者相等時方向偏好完全消失。"
   ],
   "source": "騎乘者指定",
   "updatedAt": "2026-10-08",
+
+  "targetPowerW": 100,
+  "massKg": 72,
+  "cdaM2": 0.3226,
+  "crr": 0.00622,
+  "maxSpeedKmh": 48,
+  "yawCorrection": true,
+
   "exposureK": {
     "riverside": 1.0,
     "urban": 0.3,
     "mountain": 0.0
   },
-  "cdaM2": 0.32,
-  "crr": 0.005,
-  "massKg": 80,
-  "yawCorrection": true
+
+  "_calibration": {
+    "note": "cdaM2 與 crr 由 route.gpx 的實測功率以區塊能量平衡回歸而得",
+    "method": "scripts/calibrate-rider.mjs",
+    "massAssumed": 72,
+    "r2": 0.7303,
+    "blocks": 196,
+    "rideDate": "2026-02-15"
+  }
 }

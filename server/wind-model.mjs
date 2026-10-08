@@ -17,7 +17,10 @@ import { fileURLToPath } from 'node:url';
 
 const D2R = Math.PI / 180, R2D = 180 / Math.PI;
 const R_EARTH = 6371008.8;
-const PARAMS_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../data/model-params.json');
+const DATA_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../data');
+const PARAMS_FILE = resolve(DATA_DIR, 'model-params.json');
+const PROFILE_FILE = resolve(DATA_DIR, 'rider-profile.json');
+const G = 9.80665;
 
 /**
  * 曝露度係數 k：騎士實際感受到的風速 / 模式的開闊地 10 m 風速。
@@ -36,13 +39,16 @@ const PARAMS_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../data/mo
  * 這三個值是模型參數，可在 data/model-params.json 覆寫後重算。
  */
 export const DEFAULT_PARAMS = {
-  exposureK: { riverside: 0.70, urban: 0.35, mountain: 0.25 },
+  exposureK: { riverside: 1.0, urban: 0.3, mountain: 0.0 },
+  targetPowerW: 100, // 目標持續功率；順逆時針比較以此為準，不用實測速度
   rho: 1.20,      // kg/m^3 空氣密度（會依氣溫修正）
-  cdaM2: 0.32,    // m^2 公路車手握上把
-  crr: 0.005,     // 滾動阻力係數
-  massKg: 80,     // 騎士 + 車
-  minSpeedKmh: 8, // 速度曲線下限
-  maxSpeedKmh: 55,
+  cdaM2: 0.3226,  // m^2 由實測功率校正（route.gpx, 72 kg, R²=0.73）
+  crr: 0.00622,   // 滾動阻力係數，同上校正
+  massKg: 72,     // 騎士 + 車 + 裝備
+  minSpeedKmh: 5,
+  // 下坡煞車上限。定功率模型在 −6% 會解出 54 km/h，但實測最快區塊是
+  // 46 km/h —— 差額是煞車與過彎。兩個方向套用同一上限，比較仍公平。
+  maxSpeedKmh: 48,
   // 側風 yaw 修正：阻力沿行進方向的分量為 ½ρ·CdA·|v_app|·(v+h)，
   // 側風會增大 |v_app| 因而增加阻力，即使它本身垂直於行進方向。
   // 關閉時退化為純縱向模型 ½ρ·CdA·(v+h)²，此時「均勻風場繞閉環零方向
@@ -55,14 +61,24 @@ export const DEFAULT_PARAMS = {
  * 大聲驗證：型別錯誤或缺曝露度類別一律 throw，不要靜默回退到預設值，
  * 否則使用者改了檔案卻沒生效、而且不會知道。
  */
-export function loadParams({ file = PARAMS_FILE, quiet = false } = {}) {
-  if (!existsSync(file)) return { ...DEFAULT_PARAMS, _source: 'defaults' };
+export function loadParams({ file = PARAMS_FILE, quiet = false, overrides = null } = {}) {
+  // 疊加順序：內建預設 < 實測校正的車手參數 < 使用者的 model-params.json < 呼叫端覆寫
+  let p0 = { ...DEFAULT_PARAMS };
+  if (existsSync(PROFILE_FILE)) {
+    try {
+      const pr = JSON.parse(readFileSync(PROFILE_FILE, 'utf8'));
+      for (const k of ['massKg', 'cdaM2', 'crr']) if (Number.isFinite(pr[k])) p0[k] = pr[k];
+      p0._riderProfile = { r2: pr.r2, blocks: pr.blocks, method: pr.method, rideDate: pr.rideDate };
+    } catch (e) { if (!quiet) console.warn('[warn] rider-profile.json 讀取失敗：' + e.message); }
+  }
+
+  if (!existsSync(file)) return applyOverrides({ ...p0, _source: 'defaults+profile' }, overrides, quiet);
 
   let raw;
   try { raw = JSON.parse(readFileSync(file, 'utf8')); }
   catch (e) { throw new Error(file + ' 不是合法 JSON：' + e.message); }
 
-  const p = { ...DEFAULT_PARAMS };
+  const p = { ...p0 };
   if (raw.exposureK !== undefined) {
     if (typeof raw.exposureK !== 'object' || raw.exposureK === null) {
       throw new Error('model-params.json 的 exposureK 必須是物件');
@@ -77,7 +93,7 @@ export function loadParams({ file = PARAMS_FILE, quiet = false } = {}) {
     }
     p.exposureK = { ...raw.exposureK };
   }
-  for (const key of ['rho', 'cdaM2', 'crr', 'massKg', 'minSpeedKmh', 'maxSpeedKmh']) {
+  for (const key of ['rho', 'cdaM2', 'crr', 'massKg', 'minSpeedKmh', 'maxSpeedKmh', 'targetPowerW']) {
     if (raw[key] === undefined) continue;
     if (!Number.isFinite(raw[key]) || raw[key] <= 0) {
       throw new Error('model-params.json 的 ' + key + ' = ' + JSON.stringify(raw[key]) + '，必須是正數');
@@ -95,6 +111,43 @@ export function loadParams({ file = PARAMS_FILE, quiet = false } = {}) {
   }
   p._source = file;
   p._paramSource = raw.source ?? null;
+  return applyOverrides(p, overrides, quiet);
+}
+
+/** 網站使用者可調整的參數（體重、功率等），以查詢字串傳入時用這裡驗證 */
+export const USER_TUNABLE = {
+  targetPowerW: { min: 40, max: 500, label: '目標功率 (W)' },
+  massKg: { min: 35, max: 200, label: '總質量 (kg)' },
+  cdaM2: { min: 0.15, max: 0.90, label: 'CdA (m²)' },
+  crr: { min: 0.001, max: 0.030, label: 'Crr' },
+  maxSpeedKmh: { min: 25, max: 90, label: '下坡速度上限 (km/h)' },
+};
+
+function applyOverrides(p, overrides, quiet) {
+  if (!overrides) return p;
+  const applied = {};
+  for (const [k, spec] of Object.entries(USER_TUNABLE)) {
+    const v = overrides[k];
+    if (v === undefined || v === null || v === '') continue;
+    const n = Number(v);
+    if (!Number.isFinite(n)) throw new Error(spec.label + ' 必須是數字，收到 ' + JSON.stringify(v));
+    if (n < spec.min || n > spec.max) {
+      throw new Error(spec.label + ' 必須在 ' + spec.min + ' ~ ' + spec.max + ' 之間，收到 ' + n);
+    }
+    p[k] = n; applied[k] = n;
+  }
+  if (overrides.exposureK && typeof overrides.exposureK === 'object') {
+    const ek = { ...p.exposureK };
+    for (const cls of ['riverside', 'urban', 'mountain']) {
+      const v = overrides.exposureK[cls];
+      if (v === undefined || v === null || v === '') continue;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0 || n > 3) throw new Error('exposureK.' + cls + ' 必須是 0~3 的數字');
+      ek[cls] = n;
+    }
+    p.exposureK = ek; applied.exposureK = ek;
+  }
+  if (Object.keys(applied).length) p._overrides = applied;
   return p;
 }
 
@@ -247,17 +300,52 @@ export function openWindField(segments, omPoints, { power = 2, minKm = 0.3 } = {
 }
 
 /**
- * 方向分析。
+ * 由目標功率解出地面速度。
  *
- * @param segments  route.json 的路段（含 bearing、gradePct、exposure、len）
- * @param field     與 segments 等長的開闊地風 {u,v}
- * @param orientation  segments 依索引順序行進時的繞行方向 'CW' | 'CCW'
+ *   P = [ ½ρ·CdA·|v_app|·(v+h)  +  Crr·m·g·cosθ  +  m·g·sinθ ] · v
+ *
+ * 對 v 非線性，以二分法求解。f(v) = (…)·v − P 在 v→0⁺ 時為 −P < 0，
+ * 隨 v 單調趨向 +∞，正根唯一（下坡時 f 先降後升，但 f(0)<0 仍保證唯一正根）。
+ *
+ * 關鍵：兩個方向都用這個函式，所以速度不再帶有「GPX 是逆時針錄的」偏頗。
+ * 逆風會讓同功率下速度變慢、因而在逆風中待更久 —— 這個二階效應會自動包含。
  */
-export function analyzeDirections(segments, field, orientation, params = DEFAULT_PARAMS, speedCurve = null) {
-  const curve = speedCurve || buildSpeedCurve(segments, params);
+export function solveSpeedMs(powerW, gradePct, headwindMs, crossMs, params = DEFAULT_PARAMS) {
+  const th = Math.atan(gradePct / 100);
+  const Fr = params.crr * params.massKg * G * Math.cos(th);
+  const Fg = params.massKg * G * Math.sin(th);
   const half = 0.5 * params.rho * params.cdaM2;
 
-  // 索引順序 = orientation 方向。另一方向則坡度反號、切向量反號。
+  const f = (v) => {
+    const along = v + headwindMs;
+    const vApp = params.yawCorrection ? Math.hypot(along, crossMs) : Math.abs(along);
+    return (half * vApp * along + Fr + Fg) * v - powerW;
+  };
+
+  let lo = 1e-3, hi = 40;
+  if (f(hi) < 0) return params.maxSpeedKmh / 3.6; // 極端順風/陡下坡，直接吃上限
+  for (let i = 0; i < 80; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (f(mid) < 0) lo = mid; else hi = mid;
+  }
+  const v = 0.5 * (lo + hi);
+  return Math.min(params.maxSpeedKmh / 3.6, Math.max(params.minSpeedKmh / 3.6, v));
+}
+
+/**
+ * 方向分析：在固定目標功率下，比較順時針與逆時針。
+ *
+ * 定功率時總能量 = P × T，所以「時間」就是最自然也最可解讀的比較量綱，
+ * 不需要再把焦耳換算成分鐘。
+ *
+ * @param segments     route.json 的路段（含 bearing、gradePct、exposure、len）
+ * @param field        與 segments 等長的開闊地風 {u, v}
+ * @param orientation  segments 依索引順序行進時的繞行方向 'CW' | 'CCW'
+ */
+export function analyzeDirections(segments, field, orientation, params = DEFAULT_PARAMS) {
+  const P = params.targetPowerW;
+  const half = 0.5 * params.rho * params.cdaM2;
+
   const dirs = [
     { key: orientation, sign: +1 },
     { key: orientation === 'CCW' ? 'CW' : 'CCW', sign: -1 },
@@ -265,7 +353,7 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
 
   const result = {};
   for (const { key, sign } of dirs) {
-    let workJ = 0, headTailJ = 0, distM = 0, timeS = 0;
+    let timeS = 0, distM = 0, aeroJ = 0, cappedM = 0;
     const byExposure = {};
     const perSeg = [];
 
@@ -275,132 +363,106 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
       const k = params.exposureK[s.exposure];
       if (k === undefined) throw new Error('路段 ' + i + ' 的 exposure "' + s.exposure + '" 沒有對應的 k 值');
 
-      // 行進方向單位向量（東, 北）
       const br = (s.bearing + (sign > 0 ? 0 : 180)) * D2R;
       const tx = Math.sin(br), ty = Math.cos(br);
 
-      // 騎士感受到的風 = 開闊地風 × 曝露度係數
-      const fu = k * w.u, fv = k * w.v;
-
-      // 逆風分量（內積），正值為逆風
-      const h = -(fu * tx + fv * ty);
-      // 側風分量
-      const cx = fu - (-h) * tx, cy = fv - (-h) * ty;
+      const fu = k * w.u, fv = k * w.v;            // 騎士實際感受到的風
+      const h = -(fu * tx + fv * ty);              // 逆風分量（內積）
+      const cx = fu + h * tx, cy = fv + h * ty;    // 側風分量
       const c = Math.hypot(cx, cy);
 
       const grade = sign > 0 ? s.gradePct : -s.gradePct;
-      const vKmh = curve.speedAt(grade);
-      const v = vKmh / 3.6;
+      const v = solveSpeedMs(P, grade, h, c, params);
+      const atCap = v >= params.maxSpeedKmh / 3.6 - 1e-9;
 
-      const along = v + h;                       // 沿行進方向的視風分量
+      const along = v + h;
       const vApp = params.yawCorrection ? Math.hypot(along, c) : Math.abs(along);
-      const dW = half * vApp * along * s.len;    // 這段的空氣阻力作功
+      const dAero = half * vApp * along * s.len;
+      const dt = s.len / v;
 
-      workJ += dW;
-      headTailJ += half * (2 * v * h) * s.len;   // 僅風造成的增減（交叉項）
-      distM += s.len;
-      timeS += s.len / v;
+      timeS += dt; distM += s.len; aeroJ += dAero;
+      if (atCap) cappedM += s.len;
 
-      const e = (byExposure[s.exposure] ||= { km: 0, workJ: 0, headTailJ: 0, hSum: 0, hLen: 0 });
-      e.km += s.len / 1000; e.workJ += dW; e.headTailJ += half * (2 * v * h) * s.len;
-      e.hSum += h * s.len; e.hLen += s.len;
+      const e = (byExposure[s.exposure] ||= { km: 0, timeS: 0, aeroJ: 0, hSum: 0, len: 0 });
+      e.km += s.len / 1000; e.timeS += dt; e.aeroJ += dAero;
+      e.hSum += h * s.len; e.len += s.len;
 
       perSeg.push({
         i, headwindMs: +h.toFixed(3), crossMs: +c.toFixed(3),
-        speedKmh: +vKmh.toFixed(1), appMs: +vApp.toFixed(2), workJ: +dW.toFixed(1),
+        speedKmh: +(v * 3.6).toFixed(1), appMs: +vApp.toFixed(2),
+        timeS: +dt.toFixed(2), atCap,
       });
     }
 
     result[key] = {
-      aeroWorkKJ: +(workJ / 1000).toFixed(1),
-      windTermKJ: +(headTailJ / 1000).toFixed(1),
-      distKm: +(distM / 1000).toFixed(2),
-      timeMin: +(timeS / 60).toFixed(1),
+      timeS: +timeS.toFixed(1),
+      timeMin: +(timeS / 60).toFixed(2),
+      energyKJ: +(P * timeS / 1000).toFixed(1),
+      aeroWorkKJ: +(aeroJ / 1000).toFixed(1),
+      avgSpeedKmh: +(distM / timeS * 3.6).toFixed(2),
+      brakingCapKm: +(cappedM / 1000).toFixed(2),
       byExposure: Object.fromEntries(Object.entries(byExposure).map(([k2, v2]) => [k2, {
         km: +v2.km.toFixed(2),
-        aeroWorkKJ: +(v2.workJ / 1000).toFixed(1),
-        windTermKJ: +(v2.headTailJ / 1000).toFixed(1),
-        meanHeadwindMs: +(v2.hSum / v2.hLen).toFixed(3),
+        timeMin: +(v2.timeS / 60).toFixed(2),
+        aeroWorkKJ: +(v2.aeroJ / 1000).toFixed(1),
+        avgSpeedKmh: +(v2.km * 1000 / v2.timeS * 3.6).toFixed(2),
+        meanHeadwindMs: +(v2.hSum / v2.len).toFixed(3),
       }])),
       perSeg,
     };
   }
 
   const a = result.CW, b = result.CCW;
-  const deltaKJ = +(a.aeroWorkKJ - b.aeroWorkKJ).toFixed(1);
-  const meanKJ = (a.aeroWorkKJ + b.aeroWorkKJ) / 2;
+  const deltaSec = +(a.timeS - b.timeS).toFixed(1);          // 正值 = 順時針較慢
+  const deltaKJ = +(P * deltaSec / 1000).toFixed(2);
+  const meanT = (a.timeS + b.timeS) / 2;
 
-  // 各曝露度類別對方向差的貢獻
-  const contrib = {};
+  const contribSec = {};
   for (const ex of new Set(segments.map((s) => s.exposure))) {
-    contrib[ex] = +((a.byExposure[ex]?.aeroWorkKJ ?? 0) - (b.byExposure[ex]?.aeroWorkKJ ?? 0)).toFixed(2);
+    contribSec[ex] = +(((a.byExposure[ex]?.timeMin ?? 0) - (b.byExposure[ex]?.timeMin ?? 0)) * 60).toFixed(1);
   }
-
-  // 把焦耳換算成騎士看得懂的單位：等效時間差。
-  // 假設定功率騎乘，多出的空氣阻力作功換成多花的時間 ΔT ≈ ΔW / P。
-  const powerW = estimatePowerW(segments, curve, params);
-  const deltaSec = powerW ? Math.round(Math.abs(deltaKJ) * 1000 / powerW) : null;
 
   return {
     params: { ...params },
-    speedCurve: { sampleCount: curve.sampleCount, binStep: curve.binStep },
+    targetPowerW: P,
     directions: result,
-    deltaKJ,
-    deltaPct: meanKJ > 0 ? +(100 * deltaKJ / meanKJ).toFixed(2) : 0,
-    recommend: Math.abs(deltaKJ) < 1e-9 ? null : (deltaKJ > 0 ? 'CCW' : 'CW'),
-    contributionKJ: contrib,
-    estPowerW: powerW,
     deltaSec,
+    deltaKJ,
+    deltaPct: meanT > 0 ? +(100 * deltaSec / meanT).toFixed(3) : 0,
+    recommend: deltaSec === 0 ? null : (deltaSec > 0 ? 'CCW' : 'CW'),
+    contributionSec: contribSec,
   };
 }
 
 /**
- * 由爬坡段反推騎乘者的持續輸出功率。
- * 選爬坡段是因為那裡重力項主導，估計值對 CdA 的不確定性最不敏感
- * （平路反推會把 CdA 的誤差全部吃進功率）。
+ * 自我檢驗。
+ *
+ * 核心檢查：零風 + 全線坡度歸零時，兩方向的時間必須「嚴格」相等。
+ * 這驗證幾何（bearing）、方向反轉、以及風向慣例的實作都正確。
+ *
+ * 其餘兩項是真實物理效應，不是誤差，分開報告：
+ *   均勻風 + 平路   定功率下逆風損失大於順風收益（t(h) 對 h 為凸函數），
+ *                   而閉環只保證 Σh·Δs = 0，不保證 h 的分布對稱，
+ *                   所以均勻風仍可能產生方向偏好。
+ *   零風 + 真實坡度 上下坡換邊造成的時間不對稱，與天氣完全無關。
  */
-export function estimatePowerW(segments, curve, params = DEFAULT_PARAMS) {
-  const g = 9.80665;
-  const vals = [];
-  for (const s of segments) {
-    if (s.gradePct < 2) continue;
-    const v = curve.speedAt(s.gradePct) / 3.6;
-    const sinT = s.gradePct / 100 / Math.sqrt(1 + (s.gradePct / 100) ** 2);
-    const P = params.massKg * g * v * sinT
-            + params.crr * params.massKg * g * v
-            + 0.5 * params.rho * params.cdaM2 * v ** 3;
-    vals.push(P);
-  }
-  if (!vals.length) return null;
-  vals.sort((a, b) => a - b);
-  return +vals[vals.length >> 1].toFixed(0);
-}
+export function selfTest(segments, orientation, { windMs = 5, fromDeg = 70, params = DEFAULT_PARAMS } = {}) {
+  const zero = segments.map(() => ({ u: 0, v: 0, speedMs: 0, fromDeg: 0, gustMs: 0 }));
+  const uni = toUV(windMs, fromDeg);
+  const uniField = segments.map(() => ({ ...uni, ...toSpeedDir(uni.u, uni.v), gustMs: 0 }));
+  const flat = segments.map((s) => ({ ...s, gradePct: 0 }));
+  const flatUniform = flat.map((s) => ({ ...s, exposure: 'riverside' }));
+  const pk = { ...params, exposureK: { riverside: 1, urban: 1, mountain: 1 } };
 
-/**
- * 自我檢驗：均勻風場 + 均勻曝露度 + 均勻速度時，兩方向的空氣阻力作功
- * 必須相等（環流定理）。非零殘差應僅為路線離散化誤差。
- * 這同時驗證幾何（bearing）、風向慣例、以及方向反轉的實作。
- */
-export function selfTest(segments, orientation, { windMs = 5, fromDeg = 70 } = {}) {
-  const uniform = toUV(windMs, fromDeg);
-  const field = segments.map(() => ({ ...uniform, ...toSpeedDir(uniform.u, uniform.v), gustMs: 0 }));
-  const flat = segments.map((s) => ({ ...s, exposure: 'riverside', gradePct: 0, obsSpeedKmh: 25 }));
-  const curve = { speedAt: () => 25, sampleCount: 0, binStep: 0 };
-  const base = { ...DEFAULT_PARAMS, exposureK: { riverside: 1, urban: 1, mountain: 1 } };
+  const geom = analyzeDirections(flatUniform, zero, orientation, pk);
+  const windFlat = analyzeDirections(flatUniform, uniField, orientation, pk);
+  const calmReal = analyzeDirections(segments, zero, orientation, params);
 
-  // 純縱向模型：此時恆等式嚴格成立，殘差只可能來自路線離散化
-  const lon = analyzeDirections(flat, field, orientation, { ...base, yawCorrection: false }, curve);
-  // 含 yaw 修正：殘差 = 離散化 + 側風 yaw 項
-  const yaw = analyzeDirections(flat, field, orientation, { ...base, yawCorrection: true }, curve);
-
-  const mean = (yaw.directions.CW.aeroWorkKJ + yaw.directions.CCW.aeroWorkKJ) / 2;
   return {
     windMs, fromDeg,
-    cwKJ: yaw.directions.CW.aeroWorkKJ,
-    ccwKJ: yaw.directions.CCW.aeroWorkKJ,
-    deltaKJ: yaw.deltaKJ,
-    discretizationKJ: lon.deltaKJ,            // 幾何離散化誤差
-    yawTermKJ: +(yaw.deltaKJ - lon.deltaKJ).toFixed(3), // 側風 yaw 項
-    relativePpm: mean > 0 ? +(1e6 * Math.abs(yaw.deltaKJ) / mean).toFixed(1) : 0,
+    geometrySec: geom.deltaSec,        // 必須為 0
+    uniformWindSec: windFlat.deltaSec, // 定功率下的凸性效應（真實）
+    calmGradeSec: calmReal.deltaSec,   // 上下坡換邊的不對稱（真實，與天氣無關）
+    noiseFloorSec: +Math.abs(geom.deltaSec).toFixed(2),
   };
 }

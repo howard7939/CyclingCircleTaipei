@@ -1,23 +1,28 @@
 #!/usr/bin/env node
 /**
- * 取得目前氣象資料，執行風場與方向分析，把結果印出來。
+ * 取得目前氣象資料，在固定目標功率下比較順時針與逆時針。
  * 先用數字確認模型行為正確，再談畫面。
  *
  * 執行：node --env-file=.env scripts/analyze-now.mjs
+ * 覆寫：POWER_W=120 MASS_KG=75 node --env-file=.env scripts/analyze-now.mjs
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cwaStations, cwaRain, cwaUv, openMeteo } from '../server/sources.mjs';
 import {
-  DEFAULT_PARAMS, airDensity, buildSpeedCurve, openWindField,
-  analyzeDirections, selfTest, toUV, toSpeedDir, loadParams, exposureDisplacement,
+  airDensity, openWindField, analyzeDirections, selfTest,
+  toUV, toSpeedDir, loadParams, exposureDisplacement, solveSpeedMs,
 } from '../server/wind-model.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROUTE = resolve(ROOT, 'data/route.json');
 const pad = (v, n) => String(v).padStart(n);
 const NAME = { riverside: '河濱', urban: '市區', mountain: '山區' };
+const mmss = (sec) => {
+  const s = Math.abs(Math.round(sec));
+  return Math.floor(s / 60) + ' 分 ' + String(s % 60).padStart(2, '0') + ' 秒';
+};
 
 if (!existsSync(ROUTE)) { console.error('\n[FATAL] 找不到 ' + ROUTE + '，先執行 npm run build:data\n'); process.exit(1); }
 const route = JSON.parse(readFileSync(ROUTE, 'utf8'));
@@ -25,19 +30,9 @@ const segs = route.segments;
 const M = route.meta;
 if (segs.some((s) => !s.exposure)) { console.error('\n[FATAL] 有路段缺 exposure，先執行 npm run sections\n'); process.exit(1); }
 
-// ---------- 0. 自我檢驗 ----------
-console.log('');
-console.log('=== 0. 自我檢驗：均勻風場繞閉環應無方向偏好 ===');
-console.log('  風向      CW(kJ)   CCW(kJ)      Δ      其中離散化    其中側風yaw');
-for (const d of [0, 45, 70, 135, 200, 315]) {
-  const t = selfTest(segs, M.gpxOrientation, { windMs: 5, fromDeg: d });
-  console.log('  ' + pad(d, 3) + '°  ' + pad(t.cwKJ, 9) + pad(t.ccwKJ, 10) + pad(t.deltaKJ, 8) +
-              pad(t.discretizationKJ.toFixed(3), 13) + pad(t.yawTermKJ.toFixed(3), 14));
-}
-console.log('  -> 純縱向模型下「均勻風場繞閉環零方向偏好」是嚴格恆等式，');
-console.log('     所以「離散化」那一欄才是幾何誤差；「側風yaw」是真實物理效應');
-console.log('     （側風增大視風速因而增加阻力），不是 bug。兩者合計即為');
-console.log('     方向判斷的雜訊底線：小於此量級的差異沒有意義。');
+const params0 = loadParams({
+  overrides: { targetPowerW: process.env.POWER_W, massKg: process.env.MASS_KG },
+});
 
 // ---------- 1. 取資料 ----------
 const BUF = 0.18; // 約 18 km；更大會抓進宜蘭/桃園，隔著山脈不具代表性
@@ -60,140 +55,138 @@ const [obs, rain, uv, om] = await Promise.all([
   cwaUv().catch((e) => ({ error: e.message, stations: [] })),
   openMeteo(samplePts),
 ]);
-console.log('  CWA 測站    ' + obs.stations.length + ' 站（全台 ' + (obs.totalStations ?? '?') + '）  ' +
-            (obs._cache || '') + (obs.error ? '  錯誤:' + obs.error : '') + '  觀測時間 ' +
-            (obs.stations[0]?.obsTime ?? '—'));
-console.log('  CWA 雨量站  ' + rain.stations.length + ' 站（全台 ' + (rain.totalStations ?? '?') + '）  ' + (rain._cache || ''));
-console.log('  CWA 紫外線  ' + uv.stations.length + ' 站  ' + (uv._cache || '') + '  （' + (uv.note || '') + '）');
-console.log('  Open-Meteo  ' + om.points.length + ' 取樣點  ' + (om._cache || '') + '  現況時間 ' + om.points[0].current.time);
+console.log('  CWA 測站    ' + obs.stations.length + ' 站  ' + (obs._cache || '') +
+            '  觀測時間 ' + (obs.stations[0]?.obsTime ?? '—'));
+console.log('  CWA 雨量站  ' + rain.stations.length + ' 站  ' + (rain._cache || ''));
+console.log('  Open-Meteo  ' + om.points.length + ' 取樣點  ' + (om._cache || '') +
+            '  現況時間 ' + om.points[0].current.time);
 console.log('  耗時 ' + (Date.now() - t0) + ' ms');
 
-// ---------- 2. 兩個來源的風交叉比對 ----------
+// ---------- 2. 兩個來源交叉比對 ----------
 const withWind = obs.stations.filter((s) => s.windMs != null && s.windFromDeg != null);
 const low = withWind.filter((s) => s.altM == null || s.altM < 200);
-let su = 0, sv = 0, ssum = 0;
-for (const s of low) { const c = toUV(s.windMs, s.windFromDeg); su += c.u; sv += c.v; ssum += s.windMs; }
+let su = 0, sv = 0, ssum = 0, tsum = 0, tn = 0;
+for (const s of low) {
+  const c = toUV(s.windMs, s.windFromDeg);
+  su += c.u; sv += c.v; ssum += s.windMs;
+  if (s.tempC != null) { tsum += s.tempC; tn++; }
+}
 const stVec = toSpeedDir(su / low.length, sv / low.length);
 const stScalar = ssum / low.length;
+const tempC = tn ? tsum / tn : 25;
 
 let ou = 0, ov = 0;
 for (const p of om.points) { const c = toUV(p.current.windMs, p.current.windFromDeg); ou += c.u; ov += c.v; }
 const omVec = toSpeedDir(ou / om.points.length, ov / om.points.length);
+const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+const dd = angDiff(stVec.fromDeg, omVec.fromDeg);
 
-const angDiff = (a, b) => { let d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 console.log('');
 console.log('=== 2. 兩個來源交叉比對 ===');
 console.log('  CWA 低地測站（' + low.length + ' 站）  向量平均 ' + stVec.speedMs.toFixed(2) + ' m/s @ ' +
-            stVec.fromDeg.toFixed(0) + '°   純量平均風速 ' + stScalar.toFixed(2) + ' m/s' +
+            stVec.fromDeg.toFixed(0) + '°   純量平均 ' + stScalar.toFixed(2) +
             '   方向一致性 ' + (stVec.speedMs / stScalar).toFixed(2));
-console.log('  Open-Meteo 開闊地       向量平均 ' + omVec.speedMs.toFixed(2) + ' m/s @ ' + omVec.fromDeg.toFixed(0) + '°');
-const dd = angDiff(stVec.fromDeg, omVec.fromDeg);
-console.log('  風向差 ' + dd.toFixed(0) + '°  ' + (dd <= 45 ? '✓ 一致' : '✗ 不一致，模型結果需存疑'));
-console.log('  風速比 模式/測站純量 = ' + (omVec.speedMs / stScalar).toFixed(2) +
-            '（>1 符合預期：測站受設站遮蔽讀低，模式為開闊地值）');
+console.log('  Open-Meteo 開闊地       ' + omVec.speedMs.toFixed(2) + ' m/s @ ' + omVec.fromDeg.toFixed(0) + '°');
+console.log('  風向差 ' + dd.toFixed(0) + '°  ' + (dd <= 45 ? '✓ 一致' : '✗ 不一致，模型結果需存疑') +
+            '   遮蔽比 ' + (omVec.speedMs / stScalar).toFixed(2));
 
-const alt = withWind.filter((s) => s.altM != null && s.altM >= 400);
-if (alt.length) {
-  console.log('  參考：高海拔站（' + alt.length + ' 站，≥400 m）平均風速 ' +
-              (alt.reduce((a, s) => a + s.windMs, 0) / alt.length).toFixed(2) + ' m/s');
+// ---------- 3. 車手模型 ----------
+const params = { ...params0, rho: +airDensity(tempC, 1013).toFixed(3) };
+console.log('');
+console.log('=== 3. 車手模型（功率 -> 速度） ===');
+console.log('  目標功率    ' + params.targetPowerW + ' W' + (process.env.POWER_W ? '（環境變數覆寫）' : ''));
+console.log('  總質量      ' + params.massKg + ' kg');
+console.log('  CdA         ' + params.cdaM2 + ' m²   Crr ' + params.crr +
+            (params._riderProfile ? '   （由實測功率校正，R²=' + params._riderProfile.r2 + '）' : ''));
+console.log('  空氣密度    ' + params.rho + ' kg/m³（氣溫 ' + tempC.toFixed(1) + ' °C）');
+console.log('  下坡上限    ' + params.maxSpeedKmh + ' km/h');
+console.log('  無風下的速度（km/h）：');
+console.log('    坡度  ' + [-6, -3, -1, 0, 1, 3, 6, 9].map((g) => pad(g + '%', 7)).join(''));
+console.log('    速度  ' + [-6, -3, -1, 0, 1, 3, 6, 9]
+  .map((g) => pad((solveSpeedMs(params.targetPowerW, g, 0, 0, params) * 3.6).toFixed(1), 7)).join(''));
+
+// ---------- 4. 自我檢驗 ----------
+console.log('');
+console.log('=== 4. 自我檢驗 ===');
+const st = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg, params });
+console.log('  零風 + 坡度歸零      Δt = ' + st.geometrySec.toFixed(3) + ' s   <- 必須為 0（驗證幾何與方向反轉）');
+console.log('  均勻風 + 坡度歸零    Δt = ' + st.uniformWindSec.toFixed(2) + ' s   <- 定功率下 t(h) 的凸性效應（真實）');
+console.log('  零風 + 真實坡度      Δt = ' + st.calmGradeSec.toFixed(2) + ' s   <- 上下坡換邊的不對稱（真實，與天氣無關）');
+if (Math.abs(st.geometrySec) > 0.5) {
+  console.error('\n[FATAL] 零風平路的方向差不為零（' + st.geometrySec + ' s），幾何或方向反轉有誤。\n');
+  process.exit(1);
 }
 
-// ---------- 3. 速度曲線 ----------
-const curve = buildSpeedCurve(segs);
-console.log('');
-console.log('=== 3. 坡度→速度曲線（由你自己的 GPX 時間戳建立） ===');
-console.log('  取樣 ' + curve.sampleCount + ' 段');
-console.log('  坡度   -8%   -5%   -3%   -1%    0%    1%    3%    5%    8%');
-console.log('  速度 ' + [-8, -5, -3, -1, 0, 1, 3, 5, 8].map((g) => pad(curve.speedAt(g).toFixed(1), 5)).join(' ') + '  km/h');
-
-// ---------- 4. 風場與方向分析 ----------
-const tempC = low.length ? low.reduce((a, s) => a + (s.tempC ?? 25), 0) / low.length : 25;
-const params = { ...loadParams(), rho: +airDensity(tempC, 1013).toFixed(3) };
-const D = exposureDisplacement(segs, params);
+// ---------- 5. 風場 ----------
 const field = openWindField(segs, om.points);
-const res = analyzeDirections(segs, field, M.gpxOrientation, params, curve);
-
+const res = analyzeDirections(segs, field, M.gpxOrientation, params);
+const D = exposureDisplacement(segs, params);
 const fs_ = field.map((f) => f.speedMs);
-console.log('');
-console.log('=== 4. 開闊地風場（內插到 ' + segs.length + ' 段） ===');
-console.log('  風速範圍 ' + Math.min(...fs_).toFixed(2) + ' – ' + Math.max(...fs_).toFixed(2) + ' m/s' +
-            '（空間變化 ' + (100 * (Math.max(...fs_) - Math.min(...fs_)) / (fs_.reduce((a, b) => a + b, 0) / fs_.length)).toFixed(0) + '%）');
-console.log('  空氣密度 ' + params.rho + ' kg/m³（氣溫 ' + tempC.toFixed(1) + ' °C）');
-console.log('  曝露度係數 ' + Object.entries(params.exposureK).map(([k, v]) => NAME[k] + ' ' + v).join('、') +
-            '   來源 ' + (params._paramSource || '內建預設'));
 
 console.log('');
-console.log('=== 4b. 曝露度加權位移向量 D = Σ kᵢ t̂ᵢ Δsᵢ ===');
-console.log('  各類別淨位移（逆時針行進）：');
-for (const ex of ['riverside', 'urban', 'mountain']) {
-  const c = D.byClass[ex];
-  if (!c) continue;
-  console.log('    ' + NAME[ex] + ' ' + pad(c.km.toFixed(1), 5) + ' km   東 ' + pad(c.east.toFixed(3), 8) +
-              '   北 ' + pad(c.north.toFixed(3), 8) + ' km   |v| ' + pad(c.magnitudeKm.toFixed(3), 7) +
-              ' km @ ' + pad(c.bearingDeg.toFixed(0), 4) + '°');
-}
-console.log('  D = 東 ' + D.east.toFixed(0) + ' m, 北 ' + D.north.toFixed(0) + ' m   |D| = ' +
-            D.magnitudeKm.toFixed(3) + ' km   方位 ' + D.bearingDeg.toFixed(1) + '°');
-console.log('  風從 ' + D.ccwCenterFromDeg.toFixed(0) + '° 來時最該逆時針；從 ' +
-            D.cwCenterFromDeg.toFixed(0) + '° 來時最該順時針');
-console.log('  臨界風向（此時兩方向等價）：' + D.criticalFromDeg.map((x) => x.toFixed(0) + '°').join(' 與 '));
+console.log('=== 5. 開闊地風場 ===');
+console.log('  風速範圍 ' + Math.min(...fs_).toFixed(2) + ' – ' + Math.max(...fs_).toFixed(2) + ' m/s');
+console.log('  曝露度係數 ' + Object.entries(params.exposureK).map(([k, v]) => NAME[k] + ' ' + v).join('、'));
+console.log('  曝露度加權位移 |D| ' + D.magnitudeKm.toFixed(3) + ' km @ ' + D.bearingDeg.toFixed(1) + '°');
+console.log('  -> 風從 ' + D.ccwCenterFromDeg.toFixed(0) + '° 來時最該逆時針；臨界風向 ' +
+            D.criticalFromDeg.map((x) => x.toFixed(0) + '°').join(' / '));
 
+// ---------- 6. 方向比較 ----------
 console.log('');
-console.log('=== 5. 方向分析 ===');
+console.log('=== 6. 方向比較（固定 ' + params.targetPowerW + ' W） ===');
 for (const d of ['CW', 'CCW']) {
   const r = res.directions[d];
-  console.log('  ' + (d === 'CW' ? '順時針' : '逆時針') + '  空氣阻力作功 ' + pad(r.aeroWorkKJ, 7) + ' kJ   ' +
-              '預估時間 ' + pad(r.timeMin, 6) + ' min');
+  console.log('  ' + (d === 'CW' ? '順時針' : '逆時針') + '   總時間 ' + pad(r.timeMin.toFixed(2), 7) + ' min  (' +
+              mmss(r.timeS) + ')   均速 ' + pad(r.avgSpeedKmh.toFixed(2), 6) + ' km/h   能量 ' +
+              pad(r.energyKJ, 7) + ' kJ   煞車上限路段 ' + r.brakingCapKm.toFixed(1) + ' km');
   for (const ex of ['riverside', 'urban', 'mountain']) {
     const e = r.byExposure[ex];
     if (!e) continue;
-    console.log('       ' + NAME[ex] + ' ' + pad(e.km.toFixed(1), 5) + ' km  作功 ' + pad(e.aeroWorkKJ, 7) +
-                ' kJ  平均逆風分量 ' + pad(e.meanHeadwindMs.toFixed(2), 6) + ' m/s');
+    console.log('       ' + NAME[ex] + ' ' + pad(e.km.toFixed(1), 5) + ' km   ' + pad(e.timeMin.toFixed(2), 6) +
+                ' min   均速 ' + pad(e.avgSpeedKmh.toFixed(2), 6) + ' km/h   平均逆風 ' +
+                pad(e.meanHeadwindMs.toFixed(2), 6) + ' m/s');
   }
 }
+
 console.log('');
-console.log('  差值 ΔW = W(順) − W(逆) = ' + res.deltaKJ + ' kJ  （' + res.deltaPct + '% of 平均）');
-console.log('  各類別對差值的貢獻：' +
-  Object.entries(res.contributionKJ).map(([k, v]) => NAME[k] + ' ' + v.toFixed(2) + ' kJ').join('、'));
+console.log('  Δt = t(順) − t(逆) = ' + res.deltaSec.toFixed(1) + ' s  （' + mmss(res.deltaSec) + '，' +
+            res.deltaPct + '% of 平均）');
+console.log('  各類別貢獻：' + Object.entries(res.contributionSec)
+  .map(([k, v]) => NAME[k] + ' ' + (v >= 0 ? '+' : '') + v.toFixed(0) + ' s').join('、'));
+console.log('  與天氣無關的常數項（零風）：' + st.calmGradeSec.toFixed(1) + ' s');
+console.log('  純風造成的部分：          ' + (res.deltaSec - st.calmGradeSec).toFixed(1) + ' s');
+console.log('  數值底線（零風平路）：    ' + Math.abs(st.geometrySec).toFixed(3) + ' s');
 console.log('');
-const nt = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg });
-const noise = Math.abs(nt.deltaKJ);
-console.log('  同強度均勻風的雜訊底線 ' + noise.toFixed(3) + ' kJ' +
-            '（離散化 ' + nt.discretizationKJ.toFixed(3) + ' + yaw ' + nt.yawTermKJ.toFixed(3) + '）');
-console.log('  訊噪比 ' + (Math.abs(res.deltaKJ) / Math.max(1e-6, noise)).toFixed(0) + '×');
-console.log('  推估持續功率 ' + res.estPowerW + ' W（由爬坡段反推，對 CdA 不確定性最不敏感）');
-if (Math.abs(res.deltaKJ) < noise * 3) {
-  console.log('  -> 差值未達底線的 3 倍，視為無顯著方向偏好，順逆皆可。');
+if (Math.abs(res.deltaSec) < 15) {
+  console.log('  -> 差距不到 15 秒，兩個方向實質相當，順逆皆可。');
 } else {
-  console.log('  -> 建議方向：' + (res.recommend === 'CCW' ? '逆時針' : '順時針') +
-              '  省 ' + Math.abs(res.deltaKJ).toFixed(1) + ' kJ ' +
-              '≈ 定功率下省 ' + Math.floor(res.deltaSec / 60) + ' 分 ' + (res.deltaSec % 60) + ' 秒');
+  console.log('  -> 建議方向：' + (res.recommend === 'CCW' ? '逆時針' : '順時針') + '   快 ' + mmss(res.deltaSec));
 }
 
-// ---------- 6. 雨 ----------
+// ---------- 7. 目標功率敏感度 ----------
+console.log('');
+console.log('=== 7. 目標功率對建議的影響 ===');
+console.log('  功率(W)    順時針       逆時針        Δt      建議');
+for (const P of [80, 100, 120, 150, 200]) {
+  const r = analyzeDirections(segs, field, M.gpxOrientation, { ...params, targetPowerW: P });
+  console.log('  ' + pad(P, 6) + '   ' + pad(r.directions.CW.timeMin.toFixed(1), 8) + ' min ' +
+              pad(r.directions.CCW.timeMin.toFixed(1), 8) + ' min ' + pad(r.deltaSec.toFixed(0), 7) + ' s   ' +
+              (Math.abs(r.deltaSec) < 15 ? '相當' : (r.recommend === 'CCW' ? '逆時針' : '順時針')));
+}
+
+// ---------- 8. 降雨 / 紫外線 ----------
 const rs = rain.stations.filter((s) => s.hr1 != null);
 const wet = rs.filter((s) => (s.hr1 ?? 0) > 0);
-const recent = rs.filter((s) => (s.hr6 ?? 0) > 0);
 console.log('');
-console.log('=== 6. 降雨 ===');
-console.log('  雨量站 ' + rs.length + ' 站有效   過去 1 小時有雨 ' + wet.length + ' 站   過去 6 小時有雨 ' + recent.length + ' 站');
-if (wet.length) {
-  console.log('  目前降雨中的站（前 8）：');
-  for (const s of wet.sort((a, b) => b.hr1 - a.hr1).slice(0, 8)) {
-    console.log('    ' + (s.name || s.id).padEnd(10) + ' 1hr ' + pad(s.hr1, 5) + ' mm   3hr ' + pad(s.hr3 ?? '—', 5) +
-                '   24hr ' + pad(s.hr24 ?? '—', 5) + '   ' + (s.county || '') + (s.town || ''));
-  }
-} else {
-  console.log('  目前無降雨。');
+console.log('=== 8. 降雨 / 紫外線 ===');
+console.log('  雨量站 ' + rs.length + ' 站   過去 1 小時有雨 ' + wet.length + ' 站   過去 6 小時 ' +
+            rs.filter((s) => (s.hr6 ?? 0) > 0).length + ' 站');
+for (const s of wet.sort((a, b) => b.hr1 - a.hr1).slice(0, 5)) {
+  console.log('    ' + (s.name || s.id).padEnd(10) + ' 1hr ' + pad(s.hr1, 5) + ' mm   6hr ' + pad(s.hr6 ?? '—', 5) +
+              '   ' + (s.county || '') + (s.town || ''));
 }
-
-// ---------- 7. 紫外線 ----------
 const uvNow = om.points.map((p) => p.current.uvIndex).filter((x) => Number.isFinite(x));
-const tp = uv.stations.find((s) => s.id === '466920');
-console.log('');
-console.log('=== 7. 紫外線 ===');
-console.log('  Open-Meteo 即時 UV（路線各點）' +
-            (uvNow.length ? Math.min(...uvNow).toFixed(1) + ' – ' + Math.max(...uvNow).toFixed(1) : '—') +
-            '   白天 ' + (om.points[0].current.isDay ? '是' : '否'));
-console.log('  CWA 臺北站今日最大值 ' + (tp ? tp.uvIndex : '—') + '（' + (uv.note || '') + '）');
+console.log('  即時 UV ' + (uvNow.length ? Math.min(...uvNow).toFixed(1) + '–' + Math.max(...uvNow).toFixed(1) : '—') +
+            '   白天 ' + (om.points[0].current.isDay ? '是' : '否') +
+            '   CWA 臺北今日最大 ' + (uv.stations?.find((s) => s.id === '466920')?.uvIndex ?? '—'));
 console.log('');

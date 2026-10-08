@@ -14,8 +14,8 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cwaStations, cwaRain, cwaUv, openMeteo } from './sources.mjs';
 import {
-  DEFAULT_PARAMS, airDensity, buildSpeedCurve, openWindField, analyzeDirections,
-  selfTest, toUV, toSpeedDir, loadParams, exposureDisplacement,
+  airDensity, openWindField, analyzeDirections, selfTest,
+  toUV, toSpeedDir, loadParams, exposureDisplacement, solveSpeedMs, USER_TUNABLE,
 } from './wind-model.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -75,7 +75,6 @@ async function getRoute() {
   const r = JSON.parse(await readFile(join(DATA, 'route.json'), 'utf8'));
   if (!r.segments?.length) throw new Error('route.json 沒有 segments，先執行 npm run build:data');
   if (r.segments.some((s) => !s.exposure)) throw new Error('有路段缺 exposure，先執行 npm run sections');
-  r._curve = buildSpeedCurve(r.segments);
   ROUTE = r;
   return r;
 }
@@ -84,7 +83,7 @@ const SAMPLE_N = 12;
 const BBOX_BUFFER = 0.18; // 約 18 km。再大會抓進宜蘭/桃園，隔著山脈不具代表性。
 
 /** 目前的騎乘條件：風場、方向建議、降雨、紫外線 */
-async function getConditions({ full = false } = {}) {
+async function getConditions({ full = false, overrides = null } = {}) {
   const route = await getRoute();
   const M = route.meta, segs = route.segments;
 
@@ -123,14 +122,11 @@ async function getConditions({ full = false } = {}) {
 
   const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 
-  const params = { ...loadParams({ quiet: true }), rho: +airDensity(tempC, 1013).toFixed(3) };
+  const params = { ...loadParams({ quiet: true, overrides }), rho: +airDensity(tempC, 1013).toFixed(3) };
   const field = openWindField(segs, om.points);
-  const analysis = analyzeDirections(segs, field, M.gpxOrientation, params, route._curve);
-  const noise = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg });
+  const analysis = analyzeDirections(segs, field, M.gpxOrientation, params);
+  const st = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg, params });
   const D = exposureDisplacement(segs, params);
-  // 零風基準：與天氣完全無關的方向偏好（上下坡換邊的速度不對稱）
-  const calm = analyzeDirections(segs, segs.map(() => ({ u: 0, v: 0, speedMs: 0, fromDeg: 0, gustMs: 0 })),
-                                 M.gpxOrientation, params, route._curve);
 
   const rs = rain.stations.filter((s) => s.hr1 != null);
   const out = {
@@ -149,19 +145,22 @@ async function getConditions({ full = false } = {}) {
       modelTime: om.points[0]?.current?.time ?? null,
     },
     direction: {
-      recommend: Math.abs(analysis.deltaKJ) < Math.abs(noise.deltaKJ) * 3 ? null : analysis.recommend,
+      // 定功率下總能量 = P x T，所以「時間」就是最自然的比較量綱
+      recommend: Math.abs(analysis.deltaSec) < 15 ? null : analysis.recommend,
+      deltaSec: analysis.deltaSec,
       deltaKJ: analysis.deltaKJ,
       deltaPct: analysis.deltaPct,
-      deltaSec: analysis.deltaSec,
-      estPowerW: analysis.estPowerW,
-      noiseFloorKJ: +Math.abs(noise.deltaKJ).toFixed(3),
-      snr: +(Math.abs(analysis.deltaKJ) / Math.max(1e-6, Math.abs(noise.deltaKJ))).toFixed(0),
-      contributionKJ: analysis.contributionKJ,
-      calmDeltaKJ: calm.deltaKJ,
-      windDeltaKJ: +(analysis.deltaKJ - calm.deltaKJ).toFixed(1),
+      targetPowerW: analysis.targetPowerW,
+      calmDeltaSec: st.calmGradeSec,                                   // 與天氣無關的常數項
+      windDeltaSec: +(analysis.deltaSec - st.calmGradeSec).toFixed(1), // 純風造成的部分
+      noiseFloorSec: st.noiseFloorSec,                                 // 零風平路，應為 0
+      uniformWindSec: st.uniformWindSec,
+      contributionSec: analysis.contributionSec,
       exposureDisplacement: D,
       byDirection: Object.fromEntries(Object.entries(analysis.directions).map(([k, v]) => [k, {
-        aeroWorkKJ: v.aeroWorkKJ, timeMin: v.timeMin, byExposure: v.byExposure,
+        timeMin: v.timeMin, timeS: v.timeS, avgSpeedKmh: v.avgSpeedKmh,
+        energyKJ: v.energyKJ, aeroWorkKJ: v.aeroWorkKJ,
+        brakingCapKm: v.brakingCapKm, byExposure: v.byExposure,
       }])),
     },
     rain: {
@@ -221,7 +220,25 @@ const server = createServer(async (req, res) => {
 
     if (p === '/api/conditions') {
       const full = url.searchParams.get('full') === '1';
-      return sendJson(res, 200, await getConditions({ full }));
+      // 網站使用者可調整的參數（體重、功率等）以查詢字串傳入，由模型層驗證範圍
+      const overrides = {};
+      for (const k of Object.keys(USER_TUNABLE)) {
+        if (url.searchParams.has(k)) overrides[k] = url.searchParams.get(k);
+      }
+      for (const cls of ['riverside', 'urban', 'mountain']) {
+        const v = url.searchParams.get('k_' + cls);
+        if (v !== null) (overrides.exposureK ||= {})[cls] = v;
+      }
+      try {
+        return sendJson(res, 200, await getConditions({ full, overrides }));
+      } catch (e) {
+        if (/必須/.test(e.message)) return sendJson(res, 400, { error: e.message });
+        throw e;
+      }
+    }
+
+    if (p === '/api/params') {
+      return sendJson(res, 200, { tunable: USER_TUNABLE, current: loadParams({ quiet: true }) });
     }
 
     if (p.startsWith('/api/')) {
