@@ -17,6 +17,7 @@ import {
   airDensity, openWindField, analyzeDirections, selfTest,
   toUV, toSpeedDir, loadParams, exposureDisplacement, solveSpeedMs, USER_TUNABLE,
 } from './wind-model.mjs';
+import { buildWindField } from './wind-field.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -123,7 +124,10 @@ async function getConditions({ full = false, overrides = null } = {}) {
   const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 
   const params = { ...loadParams({ quiet: true, overrides }), rho: +airDensity(tempC, 1013).toFixed(3) };
-  const field = openWindField(segs, om.points);
+  // 風場：方向以測站做 Barnes 客觀分析，風速取模式開闊地值。
+  // buildWindField 會自己跑留一交叉驗證，確認分析真的勝過純模式場才採用。
+  const wf = buildWindField(segs, om.points, obs.stations);
+  const field = wf.field;
   const analysis = analyzeDirections(segs, field, M.gpxOrientation, params);
   const st = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg, params });
   const D = exposureDisplacement(segs, params);
@@ -158,7 +162,24 @@ async function getConditions({ full = false, overrides = null } = {}) {
         gridLat: p.gridLat, gridLon: p.gridLon, gridElevM: p.gridElevM,
         windMs: p.current.windMs, fromDeg: p.current.windFromDeg, gustMs: p.current.gustMs,
       })),
-      interpolation: { method: 'IDW', power: 2, note: 'u,v 分量各自內插；絕不內插角度' },
+      // 風場分析的實際做法與成績（每次請求重新決定）
+      analysis: {
+        method: wf.method,
+        reason: wf.reason ?? null,
+        stationsUsed: wf.stationCount ?? 0,
+        eFoldKm: wf.eFoldKm ?? null,
+        kappaKm2: wf.kappaKm2 ?? null,
+        gamma: wf.gamma ?? null,
+        passes: wf.passes ?? null,
+        minSpeedMs: wf.minSpeedMs ?? null,
+        meanDirShiftDeg: wf.meanDirShiftDeg ?? 0,
+        maxDirShiftDeg: wf.maxDirShiftDeg ?? 0,
+        crossValidation: wf.crossValidation ?? null,
+        segmentCount: segs.length,
+        segmentLenM: M.segmentLenM,
+        note: '方向：測站 Barnes 客觀分析（背景場＝模式）；風速：模式開闊地值。' +
+              'u/v 分量各自處理，絕不內插角度。',
+      },
     },
     direction: {
       // 定功率下總能量 = P x T，所以「時間」就是最自然的比較量綱

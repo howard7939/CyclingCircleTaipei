@@ -46,7 +46,7 @@
   };
 
   const S = {
-    route: null, cond: null, mode: 'windCCW',
+    route: null, cond: null, dir: 'CCW', color: 'wind',
     map: null, segLayer: null, casing: null, arrowLayer: null,
     stationLayer: null, rainLayer: null, lines: [], cursor: null,
     runs: [], defaults: null, pGeom: null, inflight: null,
@@ -93,12 +93,24 @@
   function binOf(bins, v) { return bins.find((b) => v <= b.max); }
   function segColor(i) {
     const s = S.route.segments[i], c = S.cond.segments[i];
-    if (S.mode === 'exposure') return EXP[s.exposure].color;
-    if (S.mode === 'grade') return binOf(GRADE_BINS, s.gradePct).color;
-    const d = S.mode === 'windCW' ? c.cw : c.ccw;
-    return binOf(WIND_BINS, d.headwindMs).color;
+    if (S.color === 'exposure') return EXP[s.exposure].color;
+    if (S.color === 'grade') return binOf(GRADE_BINS, s.gradePct).color;
+    return binOf(WIND_BINS, c[dirKey()].headwindMs).color;
   }
-  const dirKey = () => (S.mode === 'windCW' ? 'cw' : 'ccw');
+  const dirKey = () => (S.dir === 'CW' ? 'cw' : 'ccw');
+  const isCW = () => S.dir === 'CW';
+
+  /** 檢視方向下的里程：順時針時路線反向，里程要跟著反過來算 */
+  function dispKm(i) {
+    const s = S.route.segments[i];
+    return isCW() ? (S.route.meta.totalKm - s.s1 / 1000) : (s.s0 / 1000);
+  }
+  /** 依檢視方向的行進順序 */
+  function travOrder() {
+    const n = S.route.segments.length;
+    const a = Array.from({ length: n }, (_, i) => i);
+    return isCW() ? a.reverse() : a;
+  }
 
   // ---------- 結論卡 ----------
   function renderVerdict() {
@@ -116,8 +128,6 @@
 
     $('vCW').textContent = cw.timeMin.toFixed(1) + ' min';
     $('vCCW').textContent = ccw.timeMin.toFixed(1) + ' min';
-    $('cellCW').classList.toggle('win', better === 'CW');
-    $('cellCCW').classList.toggle('win', better === 'CCW');
     syncViewing();
   }
 
@@ -133,15 +143,15 @@
       host.appendChild(r);
     };
     const segs = S.route.segments;
-    if (S.mode === 'exposure') {
+    if (S.color === 'exposure') {
       for (const [k, e] of Object.entries(EXP)) {
         const km = segs.filter((s) => s.exposure === k).reduce((a, s) => a + s.len / 1000, 0);
         add(e.color, e.name, km.toFixed(1) + ' km');
       }
       return;
     }
-    const bins = S.mode === 'grade' ? GRADE_BINS : WIND_BINS;
-    const val = S.mode === 'grade'
+    const bins = S.color === 'grade' ? GRADE_BINS : WIND_BINS;
+    const val = S.color === 'grade'
       ? ((i) => segs[i].gradePct)
       : ((i) => S.cond.segments[i][dirKey()].headwindMs);
     let prev = -Infinity;
@@ -152,7 +162,7 @@
         if (v > prev && v <= b.max) km += segs[i].len / 1000;
       }
       prev = b.max;
-      if (km > 0.05) add(b.color, b.label + (S.mode === 'grade' ? '' : ' m/s'), km.toFixed(1) + ' km');
+      if (km > 0.05) add(b.color, b.label + (S.color === 'grade' ? '' : ' m/s'), km.toFixed(1) + ' km');
     }
   }
 
@@ -333,8 +343,8 @@
     const s = S.route.segments[i], c = S.cond.segments[i];
     const rows = [
       ['路段', s.sectionLabel || EXP[s.exposure].name],
-      ['里程', (s.s0 / 1000).toFixed(2) + ' km'],
-      ['行進方位', s.bearing.toFixed(0) + '° (逆時針向)'],
+      ['里程', dispKm(i).toFixed(2) + ' km（' + (isCW() ? '順' : '逆') + '時針）'],
+      ['行進方位', (isCW() ? ((s.bearing + 180) % 360).toFixed(0) : s.bearing.toFixed(0)) + '°'],
       ['坡度', s.gradePct.toFixed(2) + ' %'],
       ['開闊地風', c.openWindMs.toFixed(2) + ' m/s @ ' + c.openWindFromDeg + '°'],
       ['— 逆時針 —', ''],
@@ -353,9 +363,9 @@
     const s = S.route.segments[i], c = S.cond.segments[i];
     const d = c[dirKey()];
     $('readout').innerHTML =
-      'km <b>' + (s.s0 / 1000).toFixed(2) + '</b> · ' + EXP[s.exposure].name +
+      'km <b>' + dispKm(i).toFixed(2) + '</b> · ' + EXP[s.exposure].name +
       ' · 坡度 <b>' + s.gradePct.toFixed(2) + '</b>%' +
-      ' · ' + (S.mode === 'windCW' ? '順時針' : '逆時針') +
+      ' · ' + (isCW() ? '順時針' : '逆時針') +
       ' 逆風 <b>' + d.headwindMs.toFixed(2) + '</b> m/s' +
       ' · 速度 <b>' + d.speedKmh.toFixed(1) + '</b> km/h';
     S.cursor.setLatLng([s.lat, s.lon]);
@@ -398,33 +408,36 @@
     svg.appendChild(mk('line', { class: 'bl', x1: P.l, x2: P.l + iw, y1: y(0), y2: y(0) }));
 
     for (const r of S.runs) {
-      const pts = r.segs.map((s) => [x((s.s0 / 1000 + s.s1 / 1000) / 2), y(s.ele)]);
+      const pts = r.segs.map((s) => [x(dispKm(s.i) + 0.0125), y(s.ele)]).sort((a, b) => a[0] - b[0]);
       if (!pts.length) continue;
-      const d = 'M' + x(r.startKm) + ',' + y(0) + 'L' +
+      const x0 = Math.min(...pts.map((p) => p[0])), x1 = Math.max(...pts.map((p) => p[0]));
+      const d = 'M' + x0 + ',' + y(0) + 'L' +
                 pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') +
-                'L' + x(r.endKm) + ',' + y(0) + 'Z';
+                'L' + x1 + ',' + y(0) + 'Z';
       svg.appendChild(mk('path', { d, fill: EXP[r.exposure].color, 'fill-opacity': .22,
                                    stroke: '#fcfcfb', 'stroke-width': 2 }));
+      r._x0 = x0; r._x1 = x1;
     }
 
     // 色帶：依目前著色模式逐段上色
+    const segW = Math.max(1, iw / segs.length + .5);
     for (let i = 0; i < segs.length; i++) {
       svg.appendChild(mk('rect', {
-        x: x(segs[i].s0 / 1000), y: stripY,
-        width: Math.max(1, x(segs[i].s1 / 1000) - x(segs[i].s0 / 1000)) + .4,
-        height: STRIP, fill: segColor(i),
+        x: x(dispKm(i)), y: stripY, width: segW, height: STRIP, fill: segColor(i),
       }));
     }
     for (const w of (S.route.meta.waypoints || [])) {
-      const wx = x(w.km);
+      const wx = x(isCW() ? (kmMax - w.km) : w.km);
       svg.appendChild(mk('line', { x1: wx, x2: wx, y1: stripY - 4, y2: stripY + STRIP + 3,
                                    stroke: '#0b0b0b', 'stroke-width': 1.2, opacity: .7 }));
     }
     for (const r of S.runs) {
-      if (x(r.endKm) - x(r.startKm) < 34) continue;
-      const t = mk('text', { class: 'runlab', x: (x(r.startKm) + x(r.endKm)) / 2,
+      if (r._x1 - r._x0 < 34) continue;
+      const t = mk('text', { class: 'runlab', x: (r._x0 + r._x1) / 2,
                              y: stripY + STRIP - 2.5, 'text-anchor': 'middle', fill: '#fff' });
-      t.textContent = EXP[r.exposure].name + (r.phase ? (r.phase === 'climb' ? '↑' : '↓') : '');
+      // sections.json 的 phase 是以逆時針定義的；順時針檢視時上下坡互換
+      const ph = r.phase ? (isCW() ? (r.phase === 'climb' ? 'descent' : 'climb') : r.phase) : null;
+      t.textContent = EXP[r.exposure].name + (ph ? (ph === 'climb' ? '↑' : '↓') : '');
       svg.appendChild(t);
     }
 
@@ -439,15 +452,17 @@
     //   風的貢獻（粗黑實線）—— 扣掉零風基準，這才是隨天氣變動、我們關心的量
     //   坡度換邊的貢獻（細灰線）—— 山區上下坡互換，擺盪達 ±1600 s 但幾乎自相抵銷
     // 若混在一條裡，山區的擺盪會把 y 軸撐大 6 倍，風的訊號就看不見了。
-    const cumWind = [], cumGrade = [];
+    // 依檢視方向的行進順序累加，曲線才讀得出「騎到哪裡拉開差距」
+    const order = travOrder();
+    const cumWind = [], cumGrade = [], cumX = [];
     let aw = 0, ag = 0;
     const hasCalm = S.cond.segments[0].cwCalmS !== undefined;
-    for (let i = 0; i < segs.length; i++) {
+    for (const i of order) {
       const c = S.cond.segments[i];
       const tot = c.cw.timeS - c.ccw.timeS;
       const gr = hasCalm ? (c.cwCalmS - c.ccwCalmS) : 0;
       ag += gr; aw += tot - gr;
-      cumGrade.push(ag); cumWind.push(aw);
+      cumGrade.push(ag); cumWind.push(aw); cumX.push(x(dispKm(i) + 0.0125));
     }
     // 只畫風的貢獻。坡度換邊的曲線在山區衝到 ±1100 s，遠超出以風為尺度的
     // 繪圖範圍，畫出來只會被夾成一條假的平線 —— 那比不畫更誤導。它的淨值
@@ -458,8 +473,7 @@
     svg.appendChild(mk('line', { x1: P.l, x2: P.l + iw, y1: cy_(0), y2: cy_(0),
                                  stroke: '#898781', 'stroke-width': 1, 'stroke-dasharray': '4 3', opacity: .7 }));
 
-    const pathOf = (arr) => 'M' + arr.map((v, i) =>
-      x((segs[i].s0 / 1000 + segs[i].s1 / 1000) / 2).toFixed(1) + ',' + cy_(v).toFixed(1)).join('L');
+    const pathOf = (arr) => 'M' + arr.map((v, k) => cumX[k].toFixed(1) + ',' + cy_(v).toFixed(1)).join('L');
 
     svg.appendChild(mk('path', { d: pathOf(cumWind), fill: 'none', stroke: '#fcfcfb', 'stroke-width': 4.5, 'stroke-linejoin': 'round' }));
     svg.appendChild(mk('path', { d: pathOf(cumWind), fill: 'none', stroke: '#0b0b0b', 'stroke-width': 2, 'stroke-linejoin': 'round' }));
@@ -469,7 +483,7 @@
       t.textContent = (v > 0 ? '+' : '') + Math.round(v) + ' s';
       svg.appendChild(t);
     }
-    const endLab = mk('text', { x: P.l + iw - 3, y: cy_(aw) - 7, 'text-anchor': 'end',
+    const endLab = mk('text', { x: cumX[cumX.length - 1] - 3, y: cy_(aw) - 7, 'text-anchor': 'end',
                                 'font-size': 11, 'font-weight': 650 });
     endLab.textContent = (aw >= 0 ? '+' : '') + Math.round(aw) + ' s';
     svg.appendChild(endLab);
@@ -482,13 +496,13 @@
       '（非「領先時間」；只有終點值是總差距）</span>　' +
       '<span style="color:var(--ink-muted)">坡度換邊另貢獻 ' + (ag >= 0 ? '+' : '') + Math.round(ag) +
       ' s（途中振幅 ±' + Math.round(gradeSwing) + ' s，幾乎自相抵銷，未繪出）</span>　· 色帶（' +
-      ({ windCCW: '逆時針順逆風', windCW: '順時針順逆風', exposure: '曝露度', grade: '坡度' }[S.mode]) + '）';
+      (S.dir === 'CW' ? '順時針 · ' : '逆時針 · ') +
+      ({ wind: '順逆風', exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
   }
   function setProfCursor(i) {
     if (!S.pGeom || !S.pGeom.cur) return;
     if (i === null) { S.pGeom.cur.setAttribute('opacity', 0); return; }
-    const s = S.route.segments[i];
-    const px = S.pGeom.x((s.s0 / 1000 + s.s1 / 1000) / 2);
+    const px = S.pGeom.x(dispKm(i) + 0.0125);
     S.pGeom.cur.setAttribute('x1', px);
     S.pGeom.cur.setAttribute('x2', px);
     S.pGeom.cur.setAttribute('opacity', 1);
@@ -499,14 +513,19 @@
     const d = S.cond.direction;
     const head = '<thead><tr><th class="l">里程</th><th class="l">類別</th><th>順(min)</th>' +
                  '<th>逆(min)</th><th>Δ(s)</th></tr></thead>';
-    const rows = S.runs.map((r, i) => {
+    const ordered = S.runs.map((r, i) => ({ r, i }))
+      .sort((a, b) => (isCW() ? (S.route.meta.totalKm - a.r.endKm) - (S.route.meta.totalKm - b.r.endKm)
+                              : a.r.startKm - b.r.startKm));
+    const rows = ordered.map(({ r, i }) => {
       let tc = 0, tcc = 0;
       for (const s of r.segs) { tc += S.cond.segments[s.i].cw.timeS; tcc += S.cond.segments[s.i].ccw.timeS; }
       const dd = tc - tcc;
-      return '<tr data-i="' + i + '"><td class="l">' + r.startKm.toFixed(1) + '–' + r.endKm.toFixed(1) + '</td>' +
+      const k0 = isCW() ? S.route.meta.totalKm - r.endKm : r.startKm;
+      const k1 = isCW() ? S.route.meta.totalKm - r.startKm : r.endKm;
+      return '<tr data-i="' + i + '"><td class="l">' + k0.toFixed(1) + '–' + k1.toFixed(1) + '</td>' +
         '<td class="l"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' +
         EXP[r.exposure].color + ';margin-right:4px"></span>' + EXP[r.exposure].name +
-        (r.phase ? (r.phase === 'climb' ? '↑' : '↓') : '') + '</td>' +
+        (r.phase ? ((isCW() ? r.phase !== 'climb' : r.phase === 'climb') ? '↑' : '↓') : '') + '</td>' +
         '<td>' + (tc / 60).toFixed(1) + '</td><td>' + (tcc / 60).toFixed(1) + '</td>' +
         '<td style="color:' + (dd > 0 ? '#0ca30c' : dd < 0 ? '#d03b3b' : 'inherit') + '">' +
         (dd >= 0 ? '+' : '') + dd.toFixed(0) + '</td></tr>';
@@ -553,14 +572,13 @@
 
   // ---------- 方向檢視切換 ----------
   function syncViewing() {
-    $('cellCW').classList.toggle('viewing', S.mode === 'windCW');
-    $('cellCCW').classList.toggle('viewing', S.mode === 'windCCW');
+    $('cellCW').classList.toggle('viewing', S.dir === 'CW');
+    $('cellCCW').classList.toggle('viewing', S.dir === 'CCW');
+    for (const b of $('dirs').children) b.setAttribute('aria-pressed', String(b.dataset.dir === S.dir));
+    for (const b of $('modes').children) b.setAttribute('aria-pressed', String(b.dataset.mode === S.color));
   }
-  function setMode(m) {
-    S.mode = m;
-    for (const b of $('modes').children) b.setAttribute('aria-pressed', String(b.dataset.mode === m));
-    syncViewing(); renderLegend(); renderMap(); renderProfile();
-  }
+  function setDir(d) { S.dir = d; syncViewing(); renderLegend(); renderMap(); renderProfile(); }
+  function setColor(c) { S.color = c; syncViewing(); renderLegend(); renderMap(); renderProfile(); }
 
   // ---------- 名詞說明 ----------
   function renderHelp() {
@@ -578,6 +596,23 @@
       '<b>臨界風向 ' + D.criticalFromDeg.map((x) => x.toFixed(0) + '°').join(' / ') + '</b>　' +
       'W 與 D 垂直之處，兩個方向等價。風從 ' + D.ccwCenterFromDeg.toFixed(0) + '° 來時最該逆時針，' +
       '從 ' + D.cwCenterFromDeg.toFixed(0) + '° 來時最該順時針。';
+
+    const an = w.analysis || {};
+    const cv = an.crossValidation;
+    $('windHelp').innerHTML +=
+      '<br><br><b>風場怎麼算出來的</b>　每 ' + (an.segmentLenM ? an.segmentLenM.toFixed(0) : '?') +
+      ' m 一段、共 ' + (an.segmentCount || 0) + ' 段各算一次。' +
+      (an.method === 'model-only'
+        ? '<br><span style="color:#d03b3b">今天採用「純模式場」</span>：' + (an.reason || '') +
+          '　—— 客觀分析沒有通過驗證就不使用，不假裝做出風場。'
+        : '<br>方向以 <b>' + an.stationsUsed + ' 個測站</b>做 Barnes 客觀分析' +
+          '（κ=' + an.kappaKm2 + ' km²，e-folding <b>' + an.eFoldKm + ' km</b>，γ=' + an.gamma +
+          '，' + an.passes + ' 遍，只收風速 ≥' + an.minSpeedMs + ' m/s 的站），' +
+          '風速取模式開闊地值。相對純模式的方向修正平均 <b>' + an.meanDirShiftDeg + '°</b>、最大 ' +
+          an.maxDirShiftDeg + '°。' +
+          (cv ? '<br>留一交叉驗證：背景場 RMS ' + cv.backgroundRmsDeg + '° → 分析後 ' +
+                cv.barnesRmsDeg + '°（<b>改善 ' + cv.rmsImprovementPct + '%</b>，' +
+                cv.improvedStations + '/' + cv.n + ' 站變好）' : ''));
 
     $('arrowHelp').innerHTML =
       '箭頭畫在 Open-Meteo 的 <b>' + w.sampleCount + ' 個取樣點</b>上（沿路線等距），' +
@@ -626,10 +661,14 @@
     // 互動
     $('modes').addEventListener('click', (ev) => {
       const b = ev.target.closest('button[data-mode]');
-      if (b) setMode(b.dataset.mode);
+      if (b) setColor(b.dataset.mode);
+    });
+    $('dirs').addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-dir]');
+      if (b) setDir(b.dataset.dir);
     });
     // 結論卡的兩欄也是方向切換鈕 —— 使用者直覺會先點那裡
-    for (const id of ['cellCW', 'cellCCW']) $(id).onclick = () => setMode($(id).dataset.dir);
+    for (const id of ['cellCW', 'cellCCW']) $(id).onclick = () => setDir($(id).dataset.dir);
 
     let timer = null;
     const onParam = () => { syncOutputs(); clearTimeout(timer); timer = setTimeout(refresh, 260); };
@@ -646,7 +685,9 @@
       const r = svg.getBoundingClientRect();
       const px = (ev.clientX - r.left) / r.width * S.pGeom.W;
       const km = (px - S.pGeom.P.l) / (S.pGeom.W - S.pGeom.P.l - S.pGeom.P.r) * S.pGeom.kmMax;
-      const i = Math.max(0, Math.min(S.route.segments.length - 1, Math.round(km * 1000 / S.route.meta.segmentLenM)));
+      const kmRoute = isCW() ? (S.route.meta.totalKm - km) : km;
+      const i = Math.max(0, Math.min(S.route.segments.length - 1,
+                Math.round(kmRoute * 1000 / S.route.meta.segmentLenM)));
       showSeg(i);
     });
     svg.addEventListener('mouseleave', clearCursor);

@@ -51,7 +51,8 @@
   .vd-cell .v{font-size:15px;font-weight:620;font-variant-numeric:tabular-nums}
   .vd-cell{font:inherit;text-align:left;border:0;cursor:pointer;width:100%}
   .vd-cell:hover{background:#eceae4}
-  .vd-cell.win{box-shadow:inset 0 0 0 1.5px var(--good)}
+  .vd-label{font-size:11px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;
+            color:var(--ink-muted);margin-bottom:1px}
   .vd-cell .tag{display:none;font-size:10px;font-weight:600;color:#fff;background:var(--ink);
                 border-radius:99px;padding:1px 6px;vertical-align:1px}
   .vd-cell.viewing .tag{display:inline-block}
@@ -145,6 +146,7 @@
   <div id="panel">
 
     <div id="verdict">
+      <div class="vd-label">建議方向</div>
       <div class="vd-row">
         <span class="vd-dir" id="vdDir">—</span>
         <span class="vd-gain" id="vdGain"></span>
@@ -152,20 +154,28 @@
       <div class="vd-sub" id="vdSub"></div>
       <div class="vd-hint">點下面任一欄，可切換地圖上檢視的騎乘方向</div>
       <div class="vd-split">
-        <button class="vd-cell" id="cellCW" data-dir="windCW">
-          <div class="k">順時針 <span class="tag">檢視</span></div><div class="v" id="vCW">—</div></button>
-        <button class="vd-cell" id="cellCCW" data-dir="windCCW">
-          <div class="k">逆時針 <span class="tag">檢視</span></div><div class="v" id="vCCW">—</div></button>
+        <button class="vd-cell" id="cellCW" data-dir="CW">
+          <div class="k">順時針 <span class="tag">檢視中</span></div><div class="v" id="vCW">—</div></button>
+        <button class="vd-cell" id="cellCCW" data-dir="CCW">
+          <div class="k">逆時針 <span class="tag">檢視中</span></div><div class="v" id="vCCW">—</div></button>
       </div>
     </div>
 
     <div class="sec">
-      <h2>路線著色</h2>
+      <h2>檢視的騎乘方向</h2>
+      <div class="modes" id="dirs">
+        <button data-dir="CCW" aria-pressed="true">逆時針</button>
+        <button data-dir="CW"  aria-pressed="false">順時針</button>
+      </div>
+      <div class="note" style="margin-top:6px">
+        切換後，底部剖面與色帶的里程也會依該方向重新排列（起點都是島頭公園）。
+      </div>
+
+      <h2 style="margin-top:16px">著色依據</h2>
       <div class="modes" id="modes">
-        <button data-mode="windCCW" aria-pressed="true">逆時針順逆風</button>
-        <button data-mode="windCW"  aria-pressed="false">順時針順逆風</button>
+        <button data-mode="wind" aria-pressed="true">順逆風</button>
         <button data-mode="exposure" aria-pressed="false">曝露度</button>
-        <button data-mode="grade"    aria-pressed="false">坡度</button>
+        <button data-mode="grade" aria-pressed="false">坡度</button>
       </div>
       <div class="legend" id="legend" style="margin-top:10px"></div>
     </div>
