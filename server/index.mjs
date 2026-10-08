@@ -12,7 +12,34 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cwaStations, cwaRain, cwaUv, openMeteo } from './sources.mjs';
+import { cwaStations, cwaRain, cwaUv, openMeteo, cwaRainAt } from './sources.mjs';
+
+// 雨量站歷史快照：每張 2.4 MB / 3-6 秒，用於取得近 6 小時的「真實逐時雨量」，
+// 取代由累積桶均分推得的粗略值。影格不會變，磁碟快取永不過期，故只在
+// 背景抓一次；抓到之前先用桶推值，不讓它擋住請求。
+const RAIN_HISTORY_HOURS = 6;
+let rainHistFetching = null;
+async function getRainHistory(bbox) {
+  const now = Date.now();
+  const byHour = new Map();
+  const missing = [];
+  for (let h = 1; h <= RAIN_HISTORY_HOURS; h++) {
+    const when = new Date(now - h * 3600e3);
+    try {
+      const snap = await cwaRainAt(when, bbox, { diskOnly: true });
+      byHour.set(h, new Map(snap.stations.map((s) => [s.id, s])));
+    } catch { missing.push(when); }
+  }
+  if (missing.length && !rainHistFetching) {
+    rainHistFetching = (async () => {
+      for (const when of missing) {
+        try { await cwaRainAt(when, bbox); }
+        catch (e) { console.warn('[rain-history] ' + when.toISOString() + ' 失敗：' + e.message); }
+      }
+    })().finally(() => { rainHistFetching = null; });
+  }
+  return { byHour, missingHours: missing.length };
+}
 import {
   airDensity, openWindField, analyzeDirections, selfTest,
   toUV, toSpeedDir, loadParams, exposureDisplacement, solveSpeedMs, USER_TUNABLE,
@@ -20,7 +47,23 @@ import {
 import { buildWindField } from './wind-field.mjs';
 import { stationWetness, surfaceAlongRoute, applyRadarNow, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
 import { fetchRadar, fetchRadarAt, radarAlongRoute, echoCells, dbzToRainMmPerH, RADAR } from './radar.mjs';
-import { estimateMotion, nowcastRide, nowcastTimeline, NOWCAST } from './nowcast.mjs';
+import { estimateMotion, nowcastRoute, NOWCAST } from './nowcast.mjs';
+
+// 雷達的 8.5 MB 下載時間 2-27 秒不等（取決於對方伺服器負載，實測變動很大，
+// 且該 API 不支援空間子集、也不壓縮），不能每次請求都等它。
+// 策略：手上有影格就先用（即使略舊），同時在背景更新；只有第一次沒得用才等。
+let latestRadar = null, radarFetching = null;
+function getRadar(bbox) {
+  const fresh = latestRadar && Date.now() - latestRadar.fetchedAtMs < RADAR.ttlMs;
+  if (!fresh && !radarFetching) {
+    radarFetching = fetchRadar(bbox, { force: true })
+      .then((f) => { latestRadar = f; return f; })
+      .catch((e) => { console.warn('[radar] 背景更新失敗：' + e.message); return null; })
+      .finally(() => { radarFetching = null; });
+  }
+  if (latestRadar) return Promise.resolve(latestRadar);
+  return radarFetching ?? Promise.resolve(null);
+}
 
 // 歷史影格要 4-27 秒，不能擋在請求路徑上。磁碟快取命中就即時算，
 // 沒有就在背景抓、下一次請求生效。背景抓取同時只允許一個。
@@ -122,7 +165,7 @@ async function getConditions({ full = false, overrides = null } = {}) {
     cwaUv().catch((e) => ({ error: e.message, stations: [] })),
     openMeteo(samplePts),
     // 雷達失敗不應該讓整頁掛掉 —— 其餘分析不依賴它
-    fetchRadar(M.bbox).catch((e) => ({ error: e.message })),
+    getRadar(M.bbox).catch((e) => ({ error: e.message })),
   ]);
 
   // 測站風的向量平均（只取低地站；高山站風速與盆地不可比）
@@ -162,7 +205,8 @@ async function getConditions({ full = false, overrides = null } = {}) {
   const nowIso = new Date().toISOString();
   const hourly = om.points[0]?.hourly || [];
   const rainSt = rain.stations.filter((s) => s.hr24 != null || s.hr1 != null);
-  const wetStations = rainSt.map((st) => stationWetness(st, hourly, nowIso));
+  const rainHist = await getRainHistory(bbox);
+  const wetStations = rainSt.map((st) => stationWetness(st, hourly, nowIso, undefined, rainHist.byHour));
   const surf = surfaceAlongRoute(segs, wetStations);
 
   // 雷達：補足雨量站的空間解析度（1.3 km vs 站距 5-10 km）。
@@ -206,32 +250,23 @@ async function getConditions({ full = false, overrides = null } = {}) {
       if (!motion.ok) {
         nowcast = { available: false, reason: motion.reason, motion };
       } else {
-        // 抵達時間：依建議方向與目標功率算出的逐段累積時間
-        const dir = analysis.recommend || M.gpxOrientation;
-        const perSeg = analysis.directions[dir].perSeg;
-        const order = dir === M.gpxOrientation
-          ? segs.map((_, i) => i) : segs.map((_, i) => segs.length - 1 - i);
-        const arrival = new Array(segs.length);
-        let acc = 0;
-        for (const i of order) { arrival[i] = acc / 60; acc += perSeg[i].timeS; }
-
-        const ride = nowcastRide(segs, radarFrame, motion, arrival);
+        // 全路線 × 未來 60 分鐘。不綁定出發點或配速 —— 服務的是全台北的騎士，
+        // 每個人的起點與出發時間都不同。
+        const nr = nowcastRoute(segs, radarFrame, motion, { stepMin: 5 });
         nowcast = {
           available: true,
-          direction: dir,
           motion: { speedKmh: motion.speedKmh, towardDeg: motion.towardDeg,
                     fromDeg: motion.fromDeg, corr: motion.corr, dtMin: motion.dtMin,
                     echoOld: motion.echoOld, echoNew: motion.echoNew },
           frames: { prev: prev.obsTime, now: radarFrame.obsTime, prevCache: prev.cache },
           horizonMin: NOWCAST.maxLeadMin,
-          timeline: nowcastTimeline(segs, radarFrame, motion),
-          ride: { firstHit: ride.firstHit, wetKm: ride.wetKm,
-                  maxRainMmPerH: ride.maxRainMmPerH,
-                  beyondHorizonKm: ride.beyondHorizonKm, anyRain: ride.anyRain },
+          leads: nr.leads,
+          timeline: nr.timeline,
+          summary: nr.summary,
           note: 'Lagrangian persistence：以交叉相關求回波移動向量，再平流外推。' +
                 '假設回波只平移、不生成也不消散 —— 0~60 分鐘通常夠用，再長會高估持續性。' +
-                '每段取的是「依目標功率算出的抵達時間」，回答的是「我騎到那裡時會不會下」。',
-          _ridePerSeg: ride.perSegment,
+                '預報涵蓋整條路線的未來 60 分鐘，不綁定出發點或配速。',
+          _perSeg: nr.perSegment,
         };
       }
     }
@@ -329,9 +364,7 @@ async function getConditions({ full = false, overrides = null } = {}) {
       rideHours: +rideH.toFixed(2),
     },
     radar,
-    nowcast: nowcast.available
-      ? { ...nowcast, _ridePerSeg: undefined }
-      : nowcast,
+    nowcast: nowcast.available ? { ...nowcast, _perSeg: undefined } : nowcast,
     surface: {
       wetKm: +wetKm.toFixed(1), dampKm: +dampKm.toFixed(1),
       dryKm: +(surfLevels.dry).toFixed(1),
@@ -343,13 +376,17 @@ async function getConditions({ full = false, overrides = null } = {}) {
         .map((w) => ({ name: w.name, lat: w.lat, lon: w.lon, area: w.area,
                        filmMm: w.filmMm, level: w.level, rainingNow: w.rainingNow,
                        hr1: w.hr1, hr6: w.hr6, hr24: w.hr24,
-                       dryInHours: w.dryInHours, dryNote: w.dryNote, evapMmPerH: w.evapMmPerH })),
+                       dryInHours: w.dryInHours, dryNote: w.dryNote, evapMmPerH: w.evapMmPerH,
+                       rainSource: w.rainSource, exactHours: w.exactHours })),
       evapNowMmPerH: wetStations.length ? wetStations[0].evapMmPerH : null,
       thresholds: { wetFilmMm: SURFACE_DEFAULTS.wetFilmMm, dampFilmMm: SURFACE_DEFAULTS.dampFilmMm },
       // 來源分工（依騎乘者指定）
       sources: {
         now: radar?.available ? 'radar' : 'stations',
         past: 'stations',
+        pastHourlyExact: rainHist.byHour.size,
+        pastHourlyPending: rainHist.missingHours,
+        pastHourlyWindow: RAIN_HISTORY_HOURS,
         drying: 'open-meteo-hourly',
         nowCoveredSegments: radar?.applied?.coveredSegments ?? 0,
         nowRainingSegments: radar?.applied?.rainingSegments ?? 0,
@@ -358,7 +395,10 @@ async function getConditions({ full = false, overrides = null } = {}) {
       note: '【現在】以雷達回波為準（1.3 km 網格），雨量站為輔（雷達範圍外時退回測站）。' +
             '【過去/地濕】以雨量站為主 —— 雷達數值網格只有最新一張、無歷史，' +
             '而雨量站有 1/3/6/12/24 小時累積且測的是地面實況。' +
-            '【乾燥】Open-Meteo 逐時日射/風/濕度，以 Penman 公式逐時積分。',
+            '【乾燥】Open-Meteo 逐時日射/風/濕度，以 Penman 公式逐時積分。' +
+            '近 ' + RAIN_HISTORY_HOURS + ' 小時改用雨量站歷史快照的實測逐時值' +
+            '（每個整點快照的 hr1 即該小時實際雨量），取代由累積桶均分推得的粗略值；' +
+            '更久以前仍用桶推，因為那麼久之前的雨對現在的路面幾乎沒有影響。',
     },
     params,
     sources: {
@@ -379,7 +419,7 @@ async function getConditions({ full = false, overrides = null } = {}) {
       cwCalmS: calm.directions.CW.perSeg[i].timeS,
       ccwCalmS: calm.directions.CCW.perSeg[i].timeS,
       surf: surf[i],
-      fc: nowcast.available ? nowcast._ridePerSeg[i] : null,
+      fc: nowcast.available ? nowcast._perSeg[i] : null,
     }));
     out.stations = low.map((s) => ({ id: s.id, name: s.name, lat: s.lat, lon: s.lon,
       altM: s.altM, windMs: s.windMs, windFromDeg: s.windFromDeg, tempC: s.tempC }));

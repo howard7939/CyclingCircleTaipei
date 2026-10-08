@@ -237,6 +237,11 @@
       <div id="radarCard"></div>
       <div id="nowcastCard"></div>
       <svg id="ncChart" viewBox="0 0 300 64" style="width:100%;display:block;margin-top:8px"></svg>
+      <div class="ctl" id="leadCtl" style="margin-top:8px;display:none">
+        <label for="lead">預報時刻</label><output id="leadOut"></output>
+        <input type="range" id="lead" min="0" max="60" step="5" value="0">
+        <div class="hint">拖動可看雨帶在未來 60 分鐘如何掃過路線（需切到「預報降雨」著色）</div>
+      </div>
       <svg id="uvChart" viewBox="0 0 300 78" style="width:100%;display:block;margin-top:10px"></svg>
       <div class="note" id="surfHelp"></div>
     </div>

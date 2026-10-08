@@ -36,6 +36,21 @@
     { max: Infinity, color: '#0d366b', label: '> 45 dBZ（豪雨）' },
   ];
   const NO_ECHO_COLOR = '#e1e0d9';
+  // 預報以「雨強 mm/h」著色（回波模式用 dBZ；這裡換成使用者看得懂的單位）
+  const FC_BINS = [
+    { max: 0.5,      color: '#cde2fb', label: '毛毛雨 < 0.5 mm/h' },
+    { max: 2.5,      color: '#9ec5f4', label: '小雨 0.5–2.5' },
+    { max: 10,       color: '#5598e7', label: '中雨 2.5–10' },
+    { max: 50,       color: '#256abf', label: '大雨 10–50' },
+    { max: Infinity, color: '#0d366b', label: '豪雨 > 50 mm/h' },
+  ];
+  /** 目前選定時刻、第 i 段的預報雨強；null 代表沒有預報 */
+  function fcRainAt(i) {
+    const n = S.cond.nowcast, c = S.cond.segments[i];
+    if (!n || !n.available || !c.fc || !Array.isArray(c.fc.rain)) return null;
+    const k = n.leads.indexOf(S.leadMin);
+    return k < 0 ? null : c.fc.rain[k];
+  }
   const GRADE_BINS = [
     { max: -6,       color: '#184f95', label: '≤ −6%' },
     { max: -3,       color: '#2a78d6', label: '−6 ~ −3%' },
@@ -63,7 +78,7 @@
   };
 
   const S = {
-    route: null, cond: null, dir: 'CCW', color: 'wind',
+    route: null, cond: null, dir: 'CCW', color: 'wind', leadMin: 0,
     map: null, segLayer: null, casing: null, arrowLayer: null,
     stationLayer: null, rainLayer: null, lines: [], cursor: null,
     runs: [], defaults: null, pGeom: null, inflight: null,
@@ -118,8 +133,9 @@
       return d == null ? NO_ECHO_COLOR : binOf(RADAR_BINS, d).color;
     }
     if (S.color === 'forecast') {
-      if (!c.fc || c.fc.beyondHorizon) return '#f4f4f1';      // 超出預報範圍
-      return c.fc.dbz == null ? NO_ECHO_COLOR : binOf(RADAR_BINS, c.fc.dbz).color;
+      const R = fcRainAt(i);
+      if (R === null) return '#f4f4f1';
+      return R <= 0 ? NO_ECHO_COLOR : binOf(FC_BINS, R).color;
     }
     return binOf(WIND_BINS, c[dirKey()].headwindMs).color;
   }
@@ -177,22 +193,20 @@
       return;
     }
     if (S.color === 'forecast') {
-      const beyond = segs.filter((s, i) => !S.cond.segments[i].fc || S.cond.segments[i].fc.beyondHorizon)
-        .reduce((a, s) => a + s.len / 1000, 0);
-      const none = segs.filter((s, i) => { const f = S.cond.segments[i].fc;
-        return f && !f.beyondHorizon && f.dbz == null; }).reduce((a, s) => a + s.len / 1000, 0);
-      add(NO_ECHO_COLOR, '預報無雨', none.toFixed(1) + ' km');
-      let prev2 = -Infinity;
-      for (const b of RADAR_BINS) {
+      const na = segs.filter((s, i) => fcRainAt(i) === null).reduce((a, s) => a + s.len / 1000, 0);
+      const none = segs.filter((s, i) => fcRainAt(i) === 0).reduce((a, s) => a + s.len / 1000, 0);
+      if (none > 0.05) add(NO_ECHO_COLOR, '預報無雨', none.toFixed(1) + ' km');
+      let prev2 = 0;
+      for (const b of FC_BINS) {
         let km = 0;
         for (let i = 0; i < segs.length; i++) {
-          const f = S.cond.segments[i].fc;
-          if (f && !f.beyondHorizon && f.dbz != null && f.dbz > prev2 && f.dbz <= b.max) km += segs[i].len / 1000;
+          const R = fcRainAt(i);
+          if (R !== null && R > prev2 && R <= b.max) km += segs[i].len / 1000;
         }
         prev2 = b.max;
         if (km > 0.02) add(b.color, b.label, km.toFixed(1) + ' km');
       }
-      add('#f4f4f1', '超出 ' + (S.cond.nowcast?.horizonMin ?? 60) + ' 分鐘預報範圍', beyond.toFixed(1) + ' km');
+      if (na > 0.05) add('#f4f4f1', '無預報資料', na.toFixed(1) + ' km');
       return;
     }
     if (S.color === 'radar') {
@@ -595,8 +609,9 @@
       '<span style="color:var(--ink-muted)">坡度換邊另貢獻 ' + (ag >= 0 ? '+' : '') + Math.round(ag) +
       ' s（途中振幅 ±' + Math.round(gradeSwing) + ' s，幾乎自相抵銷，未繪出）</span>　· 色帶（' +
       (S.dir === 'CW' ? '順時針 · ' : '逆時針 · ') +
-      ({ wind: '順逆風', surface: '路面濕度', radar: '雷達回波', forecast: '預報降雨',
-         exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
+      (S.color === 'forecast' ? '預報降雨 +' + S.leadMin + ' 分'
+        : { wind: '順逆風', surface: '路面濕度', radar: '雷達回波',
+            exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
   }
   function setProfCursor(i) {
     if (!S.pGeom || !S.pGeom.cur) return;
@@ -677,7 +692,16 @@
     for (const b of $('modes').children) b.setAttribute('aria-pressed', String(b.dataset.mode === S.color));
   }
   function setDir(d) { S.dir = d; syncViewing(); renderLegend(); renderMap(); renderProfile(); }
-  function setColor(c) { S.color = c; syncViewing(); renderLegend(); renderMap(); renderProfile(); }
+  function setColor(c) {
+    S.color = c;
+    $('leadCtl').style.display = (c === 'forecast' && S.cond?.nowcast?.available) ? 'grid' : 'none';
+    syncViewing(); renderLegend(); renderMap(); renderProfile();
+  }
+  function setLead(v) {
+    S.leadMin = +v;
+    $('leadOut').textContent = '+' + S.leadMin + ' 分';
+    renderLegend(); renderMap(); renderProfile();
+  }
 
   // ---------- 名詞說明 ----------
   function renderHelp() {
@@ -875,22 +899,22 @@
         (n?.pending ? '準備中' : '不可用') + '</b>　' + (n?.reason || '') + '</div>';
       return;
     }
-    const r = n.ride;
+    const r = n.summary;
     const cls = r.anyRain ? 'bad' : '';
     host.innerHTML =
       '<div class="sc-row" style="margin-top:8px"><div class="sc ' + cls + '">' +
-      '<div class="k">臨近預報（依你的配速，' + n.horizonMin + ' 分鐘內）</div>' +
+      '<div class="k">臨近預報（全路線，未來 ' + n.horizonMin + ' 分鐘）</div>' +
       '<div class="v">' + (r.anyRain
-        ? '會遇到雨 ' + r.wetKm.toFixed(1) + ' km'
-        : '不會遇到雨') + '</div>' +
+        ? '將有 ' + r.everWetKm.toFixed(1) + ' km 下雨'
+        : '全線無雨') + '</div>' +
       '<div class="s">' +
-      (r.anyRain && r.firstHit
-        ? '最早在 km ' + r.firstHit.km + '（出發後 ' + Math.round(r.firstHit.leadMin) + ' 分）' +
-          '，' + r.firstHit.rainMmPerH + ' mm/h · '
+      (r.anyRain && r.earliest
+        ? '最早 +' + r.earliest.leadMin + ' 分於 km ' + r.earliest.km +
+          '（' + r.earliest.rainMmPerH + ' mm/h）· '
         : '') +
       '回波 ' + n.motion.speedKmh + ' km/h 朝 ' + n.motion.towardDeg + '° · 相關度 ' + n.motion.corr +
-      '<br><span style="color:var(--ink-muted)">' + r.beyondHorizonKm.toFixed(1) +
-      ' km 超出預報範圍（全程比 ' + n.horizonMin + ' 分鐘長）</span></div>' +
+      '<br><span style="color:var(--ink-muted)">預報不綁出發點與配速；' +
+      '切到「預報降雨」著色並拖時間軸可看雨帶掃過</span></div>' +
       '</div></div>';
 
     // 時序小圖：未來 60 分鐘路線上的降雨里程
@@ -971,6 +995,8 @@
     const onParam = () => { syncOutputs(); clearTimeout(timer); timer = setTimeout(refresh, 260); };
     for (const id of ['pw', 'mk', 'cda', 'crr', 'kr', 'ku', 'km_']) $(id).addEventListener('input', onParam);
     $('reset').onclick = () => { applyDefaults(); refresh(); };
+    $('lead').addEventListener('input', (e) => setLead(e.target.value));
+    setLead(0);
 
     $('tArrows').onchange = (e) => e.target.checked ? S.arrowLayer.addTo(S.map) : S.map.removeLayer(S.arrowLayer);
     $('tStations').onchange = (e) => e.target.checked ? S.stationLayer.addTo(S.map) : S.map.removeLayer(S.stationLayer);

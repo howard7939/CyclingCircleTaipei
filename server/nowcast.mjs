@@ -12,8 +12,10 @@
  * 回波只平移、不生成也不消散 —— 對 0~60 分鐘的尺度通常夠用，再長就會
  * 高估持續性。本模組只提供到 60 分鐘，並隨前置時間標示信心下降。
  *
- * 與騎乘結合：真正要回答的不是「哪裡會下雨」，而是「我騎到那裡的時候
- * 會不會下」。所以每一路段的預報時刻，取的是依目標功率算出的抵達時間。
+ * 預報對象是「整條路線 × 未來 60 分鐘」，不綁定特定出發點或配速 ——
+ * 這個網站服務的是全台北的騎士，每個人的起點與出發時間都不同。
+ * 每一路段都給出未來各時刻的預報，以及「最早在第幾分鐘開始下雨」，
+ * 使用者自己對照他的出發時間即可。
  */
 import { dbzToRainMmPerH, rainBand, RADAR } from './radar.mjs';
 
@@ -127,7 +129,66 @@ export function forecastDbzAt(frame, motion, lat, lon, leadMin) {
 }
 
 /**
- * 沿騎乘路線的臨近預報。
+ * 全路線 × 未來各時刻的預報。
+ *
+ * 不使用抵達時間 —— 使用者的起點與出發時間各不相同，綁定單一配速等於
+ * 只服務從某一點出發的人。改為每段都給出未來各時刻的預報值，
+ * 以及「最早在第幾分鐘開始下雨」，讓使用者自行對照。
+ *
+ * @returns { leads, perSegment:[{ rain:[...], firstRainMin, maxRain }], summary }
+ */
+export function nowcastRoute(segments, frame, motion, { stepMin = 5, maxMin = NOWCAST.maxLeadMin } = {}) {
+  const leads = [];
+  for (let t = 0; t <= maxMin; t += stepMin) leads.push(t);
+
+  const per = segments.map((s) => {
+    const rain = [];
+    let first = null, maxR = 0;
+    for (const t of leads) {
+      const d = forecastDbzAt(frame, motion, s.lat, s.lon, t);
+      const R = d === null ? 0 : dbzToRainMmPerH(d);
+      rain.push(+R.toFixed(2));
+      if (R > NOWCAST.rainThresholdMmPerH) {
+        if (first === null) first = t;
+        if (R > maxR) maxR = R;
+      }
+    }
+    return { rain, firstRainMin: first, maxRainMmPerH: +maxR.toFixed(2) };
+  });
+
+  // 每個時刻有多少公里在下雨
+  const timeline = leads.map((t, k) => {
+    let km = 0, maxR = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const R = per[i].rain[k];
+      if (R > NOWCAST.rainThresholdMmPerH) { km += segments[i].len / 1000; if (R > maxR) maxR = R; }
+    }
+    return { leadMin: t, wetKm: +km.toFixed(2), maxRainMmPerH: +maxR.toFixed(2) };
+  });
+
+  const hit = per.map((p, i) => ({ i, t: p.firstRainMin })).filter((x) => x.t !== null);
+  const earliest = hit.length ? hit.reduce((a, b) => (b.t < a.t ? b : a)) : null;
+  const everWetKm = per.reduce((a, p, i) => a + (p.firstRainMin !== null ? segments[i].len / 1000 : 0), 0);
+
+  return {
+    leads, perSegment: per, timeline,
+    summary: {
+      anyRain: everWetKm > 0.1,
+      everWetKm: +everWetKm.toFixed(2),
+      earliest: earliest ? {
+        leadMin: earliest.t,
+        km: +(segments[earliest.i].s0 / 1000).toFixed(2),
+        rainMmPerH: per[earliest.i].maxRainMmPerH,
+      } : null,
+      maxRainMmPerH: Math.max(0, ...per.map((p) => p.maxRainMmPerH)),
+      horizonMin: maxMin,
+    },
+  };
+}
+
+/**
+ * （保留）沿騎乘路線、依抵達時間的預報。目前主畫面不用，但對「我現在就出發」
+ * 的情境仍然有意義，故保留供之後使用。
  * @param arrivalMin 與 segments 等長，每段的抵達時間（分鐘，自現在起算）
  */
 export function nowcastRide(segments, frame, motion, arrivalMin) {

@@ -126,12 +126,42 @@ export function hourlyRainFromBuckets(st) {
 }
 
 /**
+ * 用歷史快照組出「真實的逐時雨量」。
+ *
+ * 每個整點快照的 hr1 就是「那一小時的實際雨量」，不需要任何均分假設。
+ * 這取代了 hourlyRainFromBuckets() 在近 6 小時的粗略均分 —— 那是整個水膜
+ * 模型最粗糙的一環（12-24 小時那段是把總量平均攤到 12 小時）。
+ *
+ * 更久以前仍用累積桶反推：那麼久之前的雨對現在的路面幾乎沒有影響，
+ * 不值得為此多抓 18 次 2.4 MB。
+ *
+ * 註：最近的未完成小時用即時的 hr1，會與最後一個整點快照有時間重疊。
+ * 這不會造成重複累加 —— 水膜更新用的是 max(film, 平衡膜厚) 而非累加，
+ * 重複套用同一場雨是冪等的。
+ */
+export function hourlyRainFromHistory(st, snapshotsByHour, cfg = SURFACE_DEFAULTS) {
+  const perHour = hourlyRainFromBuckets(st);      // 先取桶推值作為基底
+  let replaced = 0;
+  for (const [hoursAgo, byId] of snapshotsByHour) {
+    if (hoursAgo < 1 || hoursAgo >= perHour.length) continue;
+    const h = byId.get(st.id);
+    if (!h || h.hr1 === null) continue;
+    perHour[hoursAgo] = Math.max(0, h.hr1);       // 該小時的實測值，取代均分值
+    replaced++;
+  }
+  return { perHour, replacedHours: replaced };
+}
+
+/**
  * 逐站積分水膜厚度。
  * @param hourly Open-Meteo 的逐時序列（需含過去 24 小時）
  * @param nowIso 目前時間
+ * @param snapshotsByHour Map<hoursAgo, Map<stationId, {hr1}>>，雨量站歷史快照
  */
-export function stationWetness(st, hourly, nowIso, cfg = SURFACE_DEFAULTS) {
-  const rain = hourlyRainFromBuckets(st);
+export function stationWetness(st, hourly, nowIso, cfg = SURFACE_DEFAULTS, snapshotsByHour = null) {
+  const hist = snapshotsByHour && snapshotsByHour.size
+    ? hourlyRainFromHistory(st, snapshotsByHour, cfg) : null;
+  const rain = hist ? hist.perHour : hourlyRainFromBuckets(st);
   const now = new Date(nowIso);
 
   // 取出過去 24 小時的氣象條件，索引 0 = 最近 1 小時
@@ -188,6 +218,8 @@ export function stationWetness(st, hourly, nowIso, cfg = SURFACE_DEFAULTS) {
     area: (st.county || '') + (st.town || ''),
     hr1: st.hr1, hr3: st.hr3, hr6: st.hr6, hr24: st.hr24,
     filmMm: +film.toFixed(3), level, rainingNow,
+    rainSource: hist ? ('history+buckets(' + hist.replacedHours + 'h 實測)') : 'buckets',
+    exactHours: hist ? hist.replacedHours : 0,
     evapMmPerH: +eRaw.toFixed(4),
     dryInHours: dryInH === null ? null : +dryInH.toFixed(1),
     dryNote,

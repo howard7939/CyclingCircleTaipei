@@ -177,6 +177,97 @@ export async function cwaRain(bbox) {
 }
 
 /**
+ * 雨量站的歷史快照（historyAPI）。
+ *
+ * 用途：取得「真實的逐時雨量」。目前的水膜模型只能從 1/3/6/12/24 小時的
+ * 累積桶反推，12-24 小時那一段是把總量平均攤到 12 小時 —— 那是整個模型
+ * 最粗糙的一環。改用歷史快照後，每個整點快照的 hr1 就是「那一小時的實際
+ * 雨量」，不需要任何均分假設。
+ *
+ * 回應為 XML（約 2.4 MB、3-10 秒）。影格一旦發布就不會變，磁碟快取永不過期。
+ */
+export async function cwaRainAt(when, bbox, { diskOnly = false } = {}) {
+  const d = new Date(when);
+  d.setMinutes(0, 0, 0);                       // 只取整點，hr1 才對應完整一小時
+  const p2 = (n) => String(n).padStart(2, '0');
+  const stamp = d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours());
+  const file = join(CACHE_DIR, 'rain-' + stamp + '.json');
+
+  try {
+    const hit = JSON.parse(await readFile(file, 'utf8'));
+    if (hit?.stations?.length) return { ...hit, _cache: 'disk' };
+  } catch { /* 無快取 */ }
+  if (diskOnly) throw new Error('磁碟沒有 ' + stamp + ' 的雨量快照');
+
+  const k = process.env.CWA_API_KEY;
+  if (!k) throw new Error('CWA_API_KEY 未設定');
+  const path = d.getFullYear() + '/' + p2(d.getMonth() + 1) + '/' + p2(d.getDate()) +
+               '/' + p2(d.getHours()) + '/00/00';
+  const t0 = Date.now();
+  const r = await fetch('https://opendata.cwa.gov.tw/historyapi/v1/getData/O-A0002-001/' + path +
+    '?Authorization=' + encodeURIComponent(k), { signal: AbortSignal.timeout(180000) });
+  if (!r.ok) throw new Error('雨量歷史 API HTTP ' + r.status + '（' + path + '）');
+  const xml = await r.text();
+
+  // XML 逐站解析。
+  //
+  // 兩個必須小心的地方（都會造成「看起來正常」的錯誤資料）：
+  //   1. 每站有兩組 <StationLatitude>：TWD67 在前、WGS84 在後。取第一個會
+  //      拿到 TWD67，與路線的 WGS84 差約 800 m，而且完全看不出異常。
+  //      因此必須先鎖定 WGS84 的 <Coordinates> 區塊再取值。
+  //   2. 歷史 XML 是 <Past6hr>，即時 JSON 是 Past6Hr —— 大小寫不同。
+  //      兩種都接受，避免某一邊靜默變成 null。
+  //
+  // 全部使用字面量正則，不用 new RegExp(字串)：'[\\s\\S]' 這類跳脫在 JS
+  // 字串字面量中會塌縮（\s -> s），曾導致所有雨量欄位靜默變成 null。
+  const out = [];
+  const blocks = xml.match(/<Station>[\s\S]*?<\/Station>/g) || [];
+  const RE = {
+    id: /<StationId>([^<]*)<\/StationId>/,
+    name: /<StationName>([^<]*)<\/StationName>/,
+    wgs: /<CoordinateName>WGS84<\/CoordinateName>[\s\S]*?<StationLatitude>([-\d.]+)<\/StationLatitude>[\s\S]*?<StationLongitude>([-\d.]+)<\/StationLongitude>/,
+    county: /<CountyName>([^<]*)<\/CountyName>/,
+    town: /<TownName>([^<]*)<\/TownName>/,
+    hr1: /<Past1hr>\s*<Precipitation>([^<]*)<\/Precipitation>/,
+    hr3: /<Past3hr>\s*<Precipitation>([^<]*)<\/Precipitation>/,
+    hr6: /<Past6[Hh]r>\s*<Precipitation>([^<]*)<\/Precipitation>/,
+    hr12: /<Past12hr>\s*<Precipitation>([^<]*)<\/Precipitation>/,
+    hr24: /<Past24hr>\s*<Precipitation>([^<]*)<\/Precipitation>/,
+  };
+  let noWgs = 0;
+  for (const b of blocks) {
+    const w = RE.wgs.exec(b);
+    if (!w) { noWgs++; continue; }
+    const lat = +w[1], lon = +w[2];
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    if (!inBox({ lat, lon }, bbox)) continue;
+    const g = (re) => { const m = re.exec(b); return m ? m[1] : null; };
+    const p = (re) => { const m = re.exec(b); return m ? num(m[1]) : null; };
+    out.push({
+      id: g(RE.id), name: g(RE.name), lat, lon,
+      county: g(RE.county), town: g(RE.town),
+      hr1: p(RE.hr1), hr3: p(RE.hr3), hr6: p(RE.hr6),
+      hr12: p(RE.hr12), hr24: p(RE.hr24),
+    });
+  }
+  if (noWgs > blocks.length * 0.1) {
+    throw new Error('雨量歷史快照有 ' + noWgs + '/' + blocks.length + ' 站找不到 WGS84 座標，格式可能已變更');
+  }
+  const withRain = out.filter((s) => s.hr24 !== null).length;
+  if (out.length && withRain === 0) {
+    throw new Error('雨量歷史快照的 ' + out.length + ' 站全部解析不到雨量欄位，格式可能已變更');
+  }
+  if (out.length < 10) {
+    throw new Error('雨量歷史快照解析異常：bbox 內只有 ' + out.length + ' 站（' + path + '）');
+  }
+  const data = { obsTime: d.toISOString(), stampHour: stamp, stations: out,
+                 _ms: Date.now() - t0, _kb: Math.round(xml.length / 1024) };
+  try { await mkdir(CACHE_DIR, { recursive: true }); await writeFile(file, JSON.stringify(data)); }
+  catch (e) { console.warn('[cache] 雨量快照寫入失敗：' + e.message); }
+  return { ...data, _cache: 'miss' };
+}
+
+/**
  * O-A0005-001 紫外線指數。
  * 注意：這是「每日最大值」而非即時值，且回應只有 {StationID, UVIndex}，
  * 沒有站名與座標。因此僅作為日尺度參考，即時 UV 改用 Open-Meteo 逐時值。
