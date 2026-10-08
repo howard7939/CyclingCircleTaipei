@@ -183,6 +183,7 @@
         <button data-mode="wind" aria-pressed="true">順逆風</button>
         <button data-mode="surface" aria-pressed="false">路面濕度</button>
         <button data-mode="radar" aria-pressed="false">雷達回波</button>
+        <button data-mode="forecast" aria-pressed="false">預報降雨</button>
         <button data-mode="exposure" aria-pressed="false">曝露度</button>
         <button data-mode="grade" aria-pressed="false">坡度</button>
       </div>
@@ -234,6 +235,8 @@
       <h2>路面與紫外線</h2>
       <div id="surfCard"></div>
       <div id="radarCard"></div>
+      <div id="nowcastCard"></div>
+      <svg id="ncChart" viewBox="0 0 300 64" style="width:100%;display:block;margin-top:8px"></svg>
       <svg id="uvChart" viewBox="0 0 300 78" style="width:100%;display:block;margin-top:10px"></svg>
       <div class="note" id="surfHelp"></div>
     </div>

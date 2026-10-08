@@ -117,6 +117,10 @@
       const d = c.surf ? c.surf.radarDbz : null;
       return d == null ? NO_ECHO_COLOR : binOf(RADAR_BINS, d).color;
     }
+    if (S.color === 'forecast') {
+      if (!c.fc || c.fc.beyondHorizon) return '#f4f4f1';      // 超出預報範圍
+      return c.fc.dbz == null ? NO_ECHO_COLOR : binOf(RADAR_BINS, c.fc.dbz).color;
+    }
     return binOf(WIND_BINS, c[dirKey()].headwindMs).color;
   }
   const dirKey = () => (S.dir === 'CW' ? 'cw' : 'ccw');
@@ -170,6 +174,25 @@
         const km = segs.filter((s) => s.exposure === k).reduce((a, s) => a + s.len / 1000, 0);
         add(e.color, e.name, km.toFixed(1) + ' km');
       }
+      return;
+    }
+    if (S.color === 'forecast') {
+      const beyond = segs.filter((s, i) => !S.cond.segments[i].fc || S.cond.segments[i].fc.beyondHorizon)
+        .reduce((a, s) => a + s.len / 1000, 0);
+      const none = segs.filter((s, i) => { const f = S.cond.segments[i].fc;
+        return f && !f.beyondHorizon && f.dbz == null; }).reduce((a, s) => a + s.len / 1000, 0);
+      add(NO_ECHO_COLOR, '預報無雨', none.toFixed(1) + ' km');
+      let prev2 = -Infinity;
+      for (const b of RADAR_BINS) {
+        let km = 0;
+        for (let i = 0; i < segs.length; i++) {
+          const f = S.cond.segments[i].fc;
+          if (f && !f.beyondHorizon && f.dbz != null && f.dbz > prev2 && f.dbz <= b.max) km += segs[i].len / 1000;
+        }
+        prev2 = b.max;
+        if (km > 0.02) add(b.color, b.label, km.toFixed(1) + ' km');
+      }
+      add('#f4f4f1', '超出 ' + (S.cond.nowcast?.horizonMin ?? 60) + ' 分鐘預報範圍', beyond.toFixed(1) + ' km');
       return;
     }
     if (S.color === 'radar') {
@@ -572,7 +595,8 @@
       '<span style="color:var(--ink-muted)">坡度換邊另貢獻 ' + (ag >= 0 ? '+' : '') + Math.round(ag) +
       ' s（途中振幅 ±' + Math.round(gradeSwing) + ' s，幾乎自相抵銷，未繪出）</span>　· 色帶（' +
       (S.dir === 'CW' ? '順時針 · ' : '逆時針 · ') +
-      ({ wind: '順逆風', surface: '路面濕度', radar: '雷達回波', exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
+      ({ wind: '順逆風', surface: '路面濕度', radar: '雷達回波', forecast: '預報降雨',
+         exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
   }
   function setProfCursor(i) {
     if (!S.pGeom || !S.pGeom.cur) return;
@@ -759,6 +783,7 @@
       '</div>';
 
     renderRadarCard();
+    renderNowcastCard();
     renderUvChart();
   }
 
@@ -839,6 +864,61 @@
     const lbl = mk('text', { x: P.l + 2, y: P.t + 9, 'text-anchor': 'start', 'font-size': 10, fill: '#898781' });
     lbl.textContent = night ? '未來 24 小時 UV 展望' : '騎乘期間 UV';
     svg.appendChild(lbl);
+  }
+
+
+  function renderNowcastCard() {
+    const n = S.cond.nowcast, host = $('nowcastCard'), svg = $('ncChart');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (!n || !n.available) {
+      host.innerHTML = '<div class="note" style="margin-top:8px">臨近預報：<b>' +
+        (n?.pending ? '準備中' : '不可用') + '</b>　' + (n?.reason || '') + '</div>';
+      return;
+    }
+    const r = n.ride;
+    const cls = r.anyRain ? 'bad' : '';
+    host.innerHTML =
+      '<div class="sc-row" style="margin-top:8px"><div class="sc ' + cls + '">' +
+      '<div class="k">臨近預報（依你的配速，' + n.horizonMin + ' 分鐘內）</div>' +
+      '<div class="v">' + (r.anyRain
+        ? '會遇到雨 ' + r.wetKm.toFixed(1) + ' km'
+        : '不會遇到雨') + '</div>' +
+      '<div class="s">' +
+      (r.anyRain && r.firstHit
+        ? '最早在 km ' + r.firstHit.km + '（出發後 ' + Math.round(r.firstHit.leadMin) + ' 分）' +
+          '，' + r.firstHit.rainMmPerH + ' mm/h · '
+        : '') +
+      '回波 ' + n.motion.speedKmh + ' km/h 朝 ' + n.motion.towardDeg + '° · 相關度 ' + n.motion.corr +
+      '<br><span style="color:var(--ink-muted)">' + r.beyondHorizonKm.toFixed(1) +
+      ' km 超出預報範圍（全程比 ' + n.horizonMin + ' 分鐘長）</span></div>' +
+      '</div></div>';
+
+    // 時序小圖：未來 60 分鐘路線上的降雨里程
+    const tl = n.timeline || [];
+    if (!tl.length) return;
+    const W = 300, H = 64, P = { t: 8, r: 8, b: 15, l: 26 };
+    const iw = W - P.l - P.r, ih = H - P.t - P.b;
+    const maxKm = Math.max(1, ...tl.map((t) => t.wetKm));
+    const x = (i) => P.l + (i / (tl.length - 1)) * iw;
+    const y = (v) => P.t + ih - (v / maxKm) * ih;
+    svg.appendChild(mk('line', { x1: P.l, x2: P.l + iw, y1: y(0), y2: y(0), stroke: '#c3c2b7' }));
+    for (const t of [0, maxKm]) {
+      const e = mk('text', { class: 'ax', x: P.l - 4, y: y(t) + 3, 'text-anchor': 'end' });
+      e.textContent = t.toFixed(t < 10 ? 1 : 0);
+      svg.appendChild(e);
+    }
+    const d = 'M' + tl.map((t, i) => x(i).toFixed(1) + ',' + y(t.wetKm).toFixed(1)).join('L');
+    svg.appendChild(mk('path', { d: d + 'L' + x(tl.length - 1) + ',' + y(0) + 'L' + x(0) + ',' + y(0) + 'Z',
+                                 fill: '#2a78d6', 'fill-opacity': .2 }));
+    svg.appendChild(mk('path', { d, fill: 'none', stroke: '#2a78d6', 'stroke-width': 2 }));
+    for (let i = 0; i < tl.length; i += 2) {
+      const e = mk('text', { class: 'ax', x: x(i), y: H - 3, 'text-anchor': 'middle' });
+      e.textContent = '+' + tl[i].leadMin;
+      svg.appendChild(e);
+    }
+    const lb = mk('text', { x: P.l + 2, y: P.t + 8, 'font-size': 10, fill: '#898781' });
+    lb.textContent = '路線上降雨里程（km）vs 分鐘後';
+    svg.appendChild(lb);
   }
 
   function renderAll() {

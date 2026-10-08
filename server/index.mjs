@@ -19,7 +19,24 @@ import {
 } from './wind-model.mjs';
 import { buildWindField } from './wind-field.mjs';
 import { stationWetness, surfaceAlongRoute, applyRadarNow, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
-import { fetchRadar, radarAlongRoute, echoCells, dbzToRainMmPerH, RADAR } from './radar.mjs';
+import { fetchRadar, fetchRadarAt, radarAlongRoute, echoCells, dbzToRainMmPerH, RADAR } from './radar.mjs';
+import { estimateMotion, nowcastRide, nowcastTimeline, NOWCAST } from './nowcast.mjs';
+
+// 歷史影格要 4-27 秒，不能擋在請求路徑上。磁碟快取命中就即時算，
+// 沒有就在背景抓、下一次請求生效。背景抓取同時只允許一個。
+let prevFrameFetching = null;
+async function getPrevFrame(nowFrame, bbox) {
+  const when = new Date(new Date(nowFrame.obsTime).getTime() - 10 * 60e3);
+  try {
+    return await fetchRadarAt(when, bbox, { diskOnly: true });
+  } catch { /* 磁碟沒有 */ }
+  if (!prevFrameFetching) {
+    prevFrameFetching = fetchRadarAt(when, bbox)
+      .catch((e) => { console.warn('[nowcast] 背景抓取歷史影格失敗：' + e.message); return null; })
+      .finally(() => { prevFrameFetching = null; });
+  }
+  return null;
+}
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -177,6 +194,49 @@ async function getConditions({ full = false, overrides = null } = {}) {
     radar = { available: false, error: radarFrame?.error ?? '未取得雷達資料' };
   }
 
+  // ---------- 臨近預報：回波移動向量 + 平流外推 ----------
+  let nowcast = { available: false, reason: '雷達不可用' };
+  if (radar?.available) {
+    const prev = await getPrevFrame(radarFrame, M.bbox);
+    if (!prev) {
+      nowcast = { available: false, pending: true,
+                  reason: '正在背景取得前一張影格（歷史 API 需 4-27 秒），稍後重新整理即可' };
+    } else {
+      const motion = estimateMotion(prev, radarFrame);
+      if (!motion.ok) {
+        nowcast = { available: false, reason: motion.reason, motion };
+      } else {
+        // 抵達時間：依建議方向與目標功率算出的逐段累積時間
+        const dir = analysis.recommend || M.gpxOrientation;
+        const perSeg = analysis.directions[dir].perSeg;
+        const order = dir === M.gpxOrientation
+          ? segs.map((_, i) => i) : segs.map((_, i) => segs.length - 1 - i);
+        const arrival = new Array(segs.length);
+        let acc = 0;
+        for (const i of order) { arrival[i] = acc / 60; acc += perSeg[i].timeS; }
+
+        const ride = nowcastRide(segs, radarFrame, motion, arrival);
+        nowcast = {
+          available: true,
+          direction: dir,
+          motion: { speedKmh: motion.speedKmh, towardDeg: motion.towardDeg,
+                    fromDeg: motion.fromDeg, corr: motion.corr, dtMin: motion.dtMin,
+                    echoOld: motion.echoOld, echoNew: motion.echoNew },
+          frames: { prev: prev.obsTime, now: radarFrame.obsTime, prevCache: prev.cache },
+          horizonMin: NOWCAST.maxLeadMin,
+          timeline: nowcastTimeline(segs, radarFrame, motion),
+          ride: { firstHit: ride.firstHit, wetKm: ride.wetKm,
+                  maxRainMmPerH: ride.maxRainMmPerH,
+                  beyondHorizonKm: ride.beyondHorizonKm, anyRain: ride.anyRain },
+          note: 'Lagrangian persistence：以交叉相關求回波移動向量，再平流外推。' +
+                '假設回波只平移、不生成也不消散 —— 0~60 分鐘通常夠用，再長會高估持續性。' +
+                '每段取的是「依目標功率算出的抵達時間」，回答的是「我騎到那裡時會不會下」。',
+          _ridePerSeg: ride.perSegment,
+        };
+      }
+    }
+  }
+
   const surfLevels = { wet: 0, damp: 0, dry: 0 };
   let maxFilm = 0, wetKm = 0, dampKm = 0;
   surf.forEach((x, i) => {
@@ -269,6 +329,9 @@ async function getConditions({ full = false, overrides = null } = {}) {
       rideHours: +rideH.toFixed(2),
     },
     radar,
+    nowcast: nowcast.available
+      ? { ...nowcast, _ridePerSeg: undefined }
+      : nowcast,
     surface: {
       wetKm: +wetKm.toFixed(1), dampKm: +dampKm.toFixed(1),
       dryKm: +(surfLevels.dry).toFixed(1),
@@ -316,6 +379,7 @@ async function getConditions({ full = false, overrides = null } = {}) {
       cwCalmS: calm.directions.CW.perSeg[i].timeS,
       ccwCalmS: calm.directions.CCW.perSeg[i].timeS,
       surf: surf[i],
+      fc: nowcast.available ? nowcast._ridePerSeg[i] : null,
     }));
     out.stations = low.map((s) => ({ id: s.id, name: s.name, lat: s.lat, lon: s.lon,
       altM: s.altM, windMs: s.windMs, windFromDeg: s.windFromDeg, tempC: s.tempC }));

@@ -15,6 +15,12 @@
  *          確認 −99 的語意是「無回波」。）
  *   −999 雷達觀測範圍外，或經品管流程移除
  *
+ * 歷史資料（由騎乘者提供的 historyAPI 端點）：
+ *   https://opendata.cwa.gov.tw/historyapi/v1/getData/O-A0059-001/{YYYY}/{MM}/{DD}/{HH}/{mm}/00
+ *   約 10 天、每 10 分鐘一張，格式為 XML（format=JSON 無效）但結構與即時版相同。
+ *   下載 4-27 秒（首次較慢，伺服器端有快取；即時版約 3 秒），故歷史影格一律
+ *   背景抓取並持久化到磁碟 —— 影格一旦發布就不會變，可以永久快取。
+ *
  * 已知限制（實測驗證，見 docs）：
  *   1. 座標系統存疑。文件寫 TWD67（與 WGS84 差約 808 m 東 / 249 m 南），
  *      但用「正在下雨的測站」對位測試，不做修正反而對得較準。樣本太小
@@ -31,10 +37,13 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FRAME_DIR = join(ROOT, 'data/cache/radar');
 const API = 'https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/O-A0059-001';
+const HISTORY_API = 'https://opendata.cwa.gov.tw/historyapi/v1/getData/O-A0059-001';
 
 export const RADAR = {
   ttlMs: 8 * 60e3,        // 產品每 10 分鐘更新
-  subBufferDeg: 0.55,     // 子網格在路線 bbox 外擴的範圍（供臨近預報用）
+  // 子網格外擴範圍。臨近預報要看到「還沒到、但正在接近」的回波，
+  // 1.0° 約 110 km，在 60 km/h 的移速下相當於約 110 分鐘的前置量。
+  subBufferDeg: 1.0,
   keepFrames: 8,          // 保留的歷史影格數（第二階段臨近預報要用）
   noEcho: -99,
   outOfRange: -999,
@@ -93,19 +102,79 @@ export async function fetchRadar(bbox, { force = false } = {}) {
   }
 
   const t1 = Date.now();
-  const vals = content.split(',');
+  const frame = extractSub(content.split(','), { lon0, lat0, res, nx, ny }, bbox, obsTime);
+  frame.timing = { fetchMs: tFetch, parseMs: Date.now() - t1,
+                   payloadKB: Math.round(txt.length / 1024) };
+  memFrame = frame;
+  saveFrame(frame).catch((e) => console.warn('[radar] 影格儲存失敗：' + e.message));
+  return { ...frame, cache: 'miss' };
+}
+
+/**
+ * 抓取指定時刻的歷史影格（historyAPI）。
+ * 回應是 XML 而非 JSON，但結構相同；用正則取值即可，不需完整 XML 解析器。
+ * 影格一旦發布就不會變，所以磁碟快取命中就直接回傳、永不過期。
+ */
+export async function fetchRadarAt(when, bbox, { diskOnly = false } = {}) {
+  const d = new Date(when);
+  d.setMinutes(Math.floor(d.getMinutes() / 10) * 10, 0, 0);
+  const stamp = isoStamp(d);
+
+  await mkdir(FRAME_DIR, { recursive: true });
+  const file = join(FRAME_DIR, 'frame-' + stamp + '.json');
+  try {
+    const cached = JSON.parse(await readFile(file, 'utf8'));
+    if (cached?.data?.length) return { ...cached, cache: 'disk' };
+  } catch { /* 沒有快取就去抓 */ }
+  if (diskOnly) throw new Error('磁碟沒有該時刻的影格：' + stamp);
+
+  const key = process.env.CWA_API_KEY;
+  if (!key) throw new Error('CWA_API_KEY 未設定');
+  const p2 = (n) => String(n).padStart(2, '0');
+  const path = d.getFullYear() + '/' + p2(d.getMonth() + 1) + '/' + p2(d.getDate()) +
+               '/' + p2(d.getHours()) + '/' + p2(d.getMinutes()) + '/00';
+
+  const t0 = Date.now();
+  const r = await fetch(HISTORY_API + '/' + path + '?Authorization=' + encodeURIComponent(key),
+    { signal: AbortSignal.timeout(240000) });
+  if (!r.ok) throw new Error('雷達歷史 API HTTP ' + r.status + '（' + path + '）');
+  const xml = await r.text();
+  const tFetch = Date.now() - t0;
+
+  const g = (re) => { const m = re.exec(xml); return m ? m[1] : null; };
+  const obsTime = g(/<DateTime>([^<]+)<\/DateTime>/);
+  const lon0 = +g(/<StartPointLongitude>([^<]+)</);
+  const lat0 = +g(/<StartPointLatitude>([^<]+)</);
+  const res = +g(/<GridResolution>([^<]+)</);
+  const nx = +g(/<GridDimensionX>([^<]+)</);
+  const ny = +g(/<GridDimensionY>([^<]+)</);
+  if (![lon0, lat0, res, nx, ny].every(Number.isFinite) || !obsTime) {
+    throw new Error('雷達歷史影格缺少必要參數（' + path + '）');
+  }
+  const ci = xml.indexOf('<content>'), cj = xml.indexOf('</content>');
+  if (ci < 0 || cj < 0) throw new Error('雷達歷史影格缺少 content（' + path + '）');
+
+  const frame = extractSub(xml.slice(ci + 9, cj).split(','),
+    { lon0, lat0, res, nx, ny }, bbox, obsTime);
+  frame.timing = { fetchMs: tFetch, payloadKB: Math.round(xml.length / 1024) };
+  frame.historical = true;
+  await writeFile(file, JSON.stringify(frame));
+  return { ...frame, cache: 'miss' };
+}
+
+/** 由完整網格截出路線周邊的子網格（即時與歷史共用） */
+function extractSub(vals, full, bbox, obsTime) {
+  const { lon0, lat0, res, nx, ny } = full;
   if (vals.length !== nx * ny) {
     throw new Error('雷達格點數不符：收到 ' + vals.length + '，預期 ' + (nx * ny));
   }
-
-  // 只截取路線周邊
   const b = RADAR.subBufferDeg;
   const ix0 = Math.max(0, Math.floor((bbox.minLon - b - lon0) / res));
   const ix1 = Math.min(nx - 1, Math.ceil((bbox.maxLon + b - lon0) / res));
   const iy0 = Math.max(0, Math.floor((bbox.minLat - b - lat0) / res));
   const iy1 = Math.min(ny - 1, Math.ceil((bbox.maxLat + b - lat0) / res));
   const sw = ix1 - ix0 + 1, sh = iy1 - iy0 + 1;
-  const sub = new Float32Array(sw * sh);
+  const sub = new Array(sw * sh);
   let nEcho = 0, nNo = 0, nOut = 0, maxDbz = -999;
   for (let y = 0; y < sh; y++) {
     for (let x = 0; x < sw; x++) {
@@ -116,26 +185,26 @@ export async function fetchRadar(bbox, { force = false } = {}) {
       else { nEcho++; if (v > maxDbz) maxDbz = v; }
     }
   }
-  const tParse = Date.now() - t1;
-
-  const frame = {
+  return {
     obsTime, fetchedAt: new Date().toISOString(), fetchedAtMs: Date.now(),
     lon0: lon0 + ix0 * res, lat0: lat0 + iy0 * res, res, nx: sw, ny: sh,
-    data: Array.from(sub),
+    data: sub,
     stats: { echoCells: nEcho, noEchoCells: nNo, outOfRangeCells: nOut,
              maxDbz: nEcho ? +maxDbz.toFixed(1) : null },
-    timing: { fetchMs: tFetch, parseMs: tParse, payloadKB: Math.round(txt.length / 1024) },
     fullGrid: { lon0, lat0, res, nx, ny },
   };
-  memFrame = frame;
-  saveFrame(frame).catch((e) => console.warn('[radar] 影格儲存失敗：' + e.message));
-  return { ...frame, cache: 'miss' };
 }
 
-/** 保留最近數張影格，供第二階段的移動向量估計使用 */
+const isoStamp = (d) => {
+  const p2 = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' +
+         p2(d.getHours()) + p2(d.getMinutes());
+};
+
+/** 保留最近數張影格，供移動向量估計使用 */
 async function saveFrame(frame) {
   await mkdir(FRAME_DIR, { recursive: true });
-  const stamp = frame.obsTime.replace(/[:+]/g, '-');
+  const stamp = isoStamp(new Date(frame.obsTime));
   await writeFile(join(FRAME_DIR, 'frame-' + stamp + '.json'), JSON.stringify(frame));
   const files = (await readdir(FRAME_DIR)).filter((f) => f.startsWith('frame-')).sort();
   for (const f of files.slice(0, Math.max(0, files.length - RADAR.keepFrames))) {
