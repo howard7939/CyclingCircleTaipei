@@ -106,8 +106,11 @@
 
   #profile{flex:none;background:var(--surface);border-top:1px solid var(--hair);padding:7px 16px 5px}
   #profile svg{display:block;width:100%;height:150px;overflow:visible}
-  #profile .ttl{display:flex;justify-content:space-between;align-items:baseline;
+  #profile .ttl{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
                 font-size:11.5px;color:var(--ink-muted);margin-bottom:2px}
+  /* 標題可壓縮並截斷，讀數不換行 —— 否則游標讀數變長時會把標題擠亂 */
+  #profTitle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #readout{flex:0 0 auto;white-space:nowrap}
   #readout{font-variant-numeric:tabular-nums;color:var(--ink-2)}
   #readout b{color:var(--ink)}
   .ax{font-size:10px;fill:var(--ink-muted);font-variant-numeric:tabular-nums}
@@ -122,6 +125,11 @@
   .tip td{padding:1px 0}
   .tip td:first-child{color:var(--ink-muted);padding-right:10px}
   .tip td:last-child{font-variant-numeric:tabular-nums;text-align:right}
+  .tip .spd{font-size:25px;font-weight:680;line-height:1.1;margin:3px 0 0;
+            font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+  .tip .spd .u{font-size:12px;font-weight:600;color:var(--ink-2)}
+  .tip .sub{font-size:11px;color:var(--ink-muted);margin-bottom:4px}
+  .segTip{font:inherit}
 
   #err{margin:16px;padding:14px 16px;border-radius:8px;background:#fdf2f2;
        border:1px solid var(--crit);color:#7a1d1d;white-space:pre-wrap;
@@ -159,7 +167,7 @@
         <span class="vd-gain" id="vdGain"></span>
       </div>
       <div class="vd-sub" id="vdSub"></div>
-      <div class="vd-hint">點下面任一欄，可切換地圖上檢視的騎乘方向</div>
+      <div class="vd-hint">點下面任一欄切換檢視方向；底部剖面與色帶的里程會跟著該方向重排（起點都是島頭公園）</div>
       <div class="vd-split">
         <button class="vd-cell" id="cellCW" data-dir="CW">
           <div class="k">順時針 <span class="tag">檢視中</span></div><div class="v" id="vCW">—</div></button>
@@ -169,16 +177,7 @@
     </div>
 
     <div class="sec">
-      <h2>檢視的騎乘方向</h2>
-      <div class="modes" id="dirs">
-        <button data-dir="CCW" aria-pressed="true">逆時針</button>
-        <button data-dir="CW"  aria-pressed="false">順時針</button>
-      </div>
-      <div class="note" style="margin-top:6px">
-        切換後，底部剖面與色帶的里程也會依該方向重新排列（起點都是島頭公園）。
-      </div>
-
-      <h2 style="margin-top:16px">著色依據</h2>
+      <h2>著色依據</h2>
       <div class="modes" id="modes">
         <button data-mode="wind" aria-pressed="true">順逆風</button>
         <button data-mode="surface" aria-pressed="false">路面濕度</button>

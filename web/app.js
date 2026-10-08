@@ -344,6 +344,7 @@
       const pts = grp.map((s) => s.a).concat([grp[grp.length - 1].b]);
       const mid = i + Math.floor(grp.length / 2);
       const pl = L.polyline(pts, { color: '#999', weight: 4, lineCap: 'butt', bubblingMouseEvents: false });
+      pl.bindTooltip('', { sticky: true, direction: 'top', opacity: .97, className: 'segTip' });
       pl.on('mouseover', () => { showSeg(mid); pl.setStyle({ weight: 8 }); });
       pl.on('mouseout', () => { pl.setStyle({ weight: 4 }); clearCursor(); });
       pl.on('click', () => L.popup({ maxWidth: 330 }).setLatLng([segs[mid].lat, segs[mid].lon])
@@ -360,7 +361,11 @@
   }
 
   function renderMap() {
-    S.lines.forEach((pl, k) => pl.setStyle({ color: segColor(S.lineIdx[k]), weight: 4 }));
+    S.lines.forEach((pl, k) => {
+      const i = S.lineIdx[k];
+      pl.setStyle({ color: segColor(i), weight: 4 });
+      pl.setTooltipContent(hoverTip(i));
+    });
 
     // 風向箭頭：直接畫在 Open-Meteo 的「取樣點」上，而不是沿路線等距亂擺 ——
     // 這樣箭頭的位置就等於風場資料的真實來源，hover 可以看到該點的原始值。
@@ -450,6 +455,35 @@
     }
   }
 
+  /**
+   * 滑鼠停留時的簡短資訊，主角是「此處模擬出來的騎乘速度」。
+   * 速度是由目標功率解出來的（不是實測），所以一併標出造成它的三個原因：
+   * 坡度、逆風分量、陣風起伏 —— 否則看到一個數字也不知道為什麼是這樣。
+   */
+  function hoverTip(i) {
+    const s = S.route.segments[i], c = S.cond.segments[i];
+    const d = c[dirKey()], o = c[isCW() ? 'ccw' : 'cw'];
+    const P = S.cond.params?.targetPowerW ?? '?';
+    // 單位要跟著值走：沒有縱向風時接上 " m/s" 會變成「無縱風 m/s」
+    const wind = d.headwindMs > 0.05 ? '逆風 ' + d.headwindMs.toFixed(1) + ' m/s'
+               : d.headwindMs < -0.05 ? '順風 ' + (-d.headwindMs).toFixed(1) + ' m/s'
+               : '無（純側風或無風）';
+    const gust = d.gustSigmaMs > 0.05
+      ? '　陣風 σ ' + d.gustSigmaMs.toFixed(1) + ' m/s（慢 ' + (d.gustPenaltyS ?? 0).toFixed(2) + ' s）' : '';
+    return '<div class="tip">' +
+      '<div class="h">km ' + dispKm(i).toFixed(2) + '　<span style="font-weight:400;color:#898781">' +
+        EXP[s.exposure].name + ' · ' + (isCW() ? '順時針' : '逆時針') + '</span></div>' +
+      '<div class="spd">' + d.speedKmh.toFixed(1) + '<span class="u"> km/h</span></div>' +
+      '<div class="sub">' + P + ' W 下的模擬速度' +
+        (d.atCap ? '（已達下坡煞車上限）' : '') + '</div>' +
+      '<table>' +
+      '<tr><td>坡度</td><td>' + (isCW() ? -s.gradePct : s.gradePct).toFixed(1) + '%</td></tr>' +
+      '<tr><td>縱向風</td><td>' + wind + '</td></tr>' +
+      (gust ? '<tr><td>陣風</td><td>σ ' + d.gustSigmaMs.toFixed(1) + ' m/s</td></tr>' : '') +
+      '<tr><td>反向同段</td><td>' + o.speedKmh.toFixed(1) + ' km/h</td></tr>' +
+      '</table></div>';
+  }
+
   function tipHtml(i) {
     const s = S.route.segments[i], c = S.cond.segments[i];
     const rows = [
@@ -481,12 +515,11 @@
   function showSeg(i) {
     const s = S.route.segments[i], c = S.cond.segments[i];
     const d = c[dirKey()];
+    // 細節交給游標旁的 tooltip；這一行只留最關鍵的，避免擠壞剖面標題
     $('readout').innerHTML =
       'km <b>' + dispKm(i).toFixed(2) + '</b> · ' + EXP[s.exposure].name +
-      ' · 坡度 <b>' + s.gradePct.toFixed(2) + '</b>%' +
-      ' · ' + (isCW() ? '順時針' : '逆時針') +
-      ' 逆風 <b>' + d.headwindMs.toFixed(2) + '</b> m/s' +
-      ' · 速度 <b>' + d.speedKmh.toFixed(1) + '</b> km/h';
+      ' · 坡度 <b>' + (isCW() ? -s.gradePct : s.gradePct).toFixed(1) + '</b>%' +
+      ' · <b>' + d.speedKmh.toFixed(1) + '</b> km/h';
     S.cursor.setLatLng([s.lat, s.lon]);
     if (!S.map.hasLayer(S.cursor)) S.cursor.addTo(S.map);
     setProfCursor(i);
@@ -695,7 +728,6 @@
   function syncViewing() {
     $('cellCW').classList.toggle('viewing', S.dir === 'CW');
     $('cellCCW').classList.toggle('viewing', S.dir === 'CCW');
-    for (const b of $('dirs').children) b.setAttribute('aria-pressed', String(b.dataset.dir === S.dir));
     for (const b of $('modes').children) b.setAttribute('aria-pressed', String(b.dataset.mode === S.color));
   }
   function setDir(d) { S.dir = d; syncViewing(); renderLegend(); renderMap(); renderProfile(); }
@@ -1079,11 +1111,7 @@
       const b = ev.target.closest('button[data-mode]');
       if (b) setColor(b.dataset.mode);
     });
-    $('dirs').addEventListener('click', (ev) => {
-      const b = ev.target.closest('button[data-dir]');
-      if (b) setDir(b.dataset.dir);
-    });
-    // 結論卡的兩欄也是方向切換鈕 —— 使用者直覺會先點那裡
+    // 方向切換只有結論卡這一處 —— 同一件事放兩個地方只會讓人懷疑它們不一樣
     for (const id of ['cellCW', 'cellCCW']) $(id).onclick = () => setDir($(id).dataset.dir);
 
     let timer = null;
