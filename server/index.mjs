@@ -127,6 +127,11 @@ async function getConditions({ full = false, overrides = null } = {}) {
   const analysis = analyzeDirections(segs, field, M.gpxOrientation, params);
   const st = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg, params });
   const D = exposureDisplacement(segs, params);
+  // 零風條件下的同一條路線：用來把「風造成的時間差」與「上下坡換邊造成的
+  // 時間差」分開。山區換邊的擺盪可達 ±1600 s 卻幾乎自相抵銷，不分開的話
+  // 會把真正關心的風訊號壓到看不見。
+  const calmField = segs.map(() => ({ u: 0, v: 0, speedMs: 0, fromDeg: 0, gustMs: 0 }));
+  const calm = analyzeDirections(segs, calmField, M.gpxOrientation, params);
 
   const rs = rain.stations.filter((s) => s.hr1 != null);
   const out = {
@@ -192,6 +197,8 @@ async function getConditions({ full = false, overrides = null } = {}) {
       i, km: +(s.s0 / 1000).toFixed(2), exposure: s.exposure,
       openWindMs: +field[i].speedMs.toFixed(2), openWindFromDeg: +field[i].fromDeg.toFixed(0),
       cw: analysis.directions.CW.perSeg[i], ccw: analysis.directions.CCW.perSeg[i],
+      cwCalmS: calm.directions.CW.perSeg[i].timeS,
+      ccwCalmS: calm.directions.CCW.perSeg[i].timeS,
     }));
     out.stations = low.map((s) => ({ id: s.id, name: s.name, lat: s.lat, lon: s.lon,
       altM: s.altM, windMs: s.windMs, windFromDeg: s.windFromDeg, tempC: s.tempC }));
