@@ -54,6 +54,10 @@ for (const [i, s] of secs.entries()) {
   need(s.toKm > s.fromKm, '第 ' + i + ' 個 section 的 toKm 不大於 fromKm：' + JSON.stringify(s));
   need(VALID.has(s.exposure),
     '第 ' + i + ' 個 section 的 exposure "' + s.exposure + '" 不在 ' + [...VALID].join('/') + ' 之中');
+  if (s.kFactor !== undefined) {
+    need(Number.isFinite(s.kFactor) && s.kFactor >= 0 && s.kFactor <= 3,
+      '第 ' + i + ' 個 section 的 kFactor = ' + JSON.stringify(s.kFactor) + '，必須是 0~3 的數字');
+  }
 }
 need(Math.abs(secs[0].fromKm) < 1e-9, '第一個 section 必須從 0.0 km 開始，實際為 ' + secs[0].fromKm);
 for (let i = 1; i < secs.length; i++) {
@@ -140,6 +144,8 @@ for (const s of route.segments) {
   s.exposure = sec.exposure;
   s.sectionLabel = sec.label;
   s.phase = sec.phase ?? null;
+  // 同屬河濱但風程差異很大的河段，以倍率表達（見 sections.json 的 _kFactorNote）
+  s.kFactor = sec.kFactor ?? 1;
   delete s.exposureFilled;
   delete s.rampOverLevee;
 }
@@ -177,7 +183,8 @@ for (const sec of secs) {
   const eles = ss.map((s) => s.ele);
   const vs = ss.map((s) => s.obsSpeedKmh).filter((x) => x != null).sort((a, b) => a - b);
   console.log('  km ' + pad(sec.fromKm.toFixed(1), 5) + ' – ' + pad(sec.toKm.toFixed(1), 5) +
-              '  ' + NAME[sec.exposure] + '  ' + pad(km.toFixed(1), 5) + ' km  高度 ' +
+              '  ' + NAME[sec.exposure] + ' ×' + (sec.kFactor ?? 1).toFixed(2) +
+              '  ' + pad(km.toFixed(1), 5) + ' km  高度 ' +
               pad(Math.min(...eles).toFixed(0), 4) + '–' + pad(Math.max(...eles).toFixed(0), 4) + ' m  中位速 ' +
               pad(vs.length ? vs[vs.length >> 1].toFixed(1) : '—', 5) + ' km/h   ' + sec.label);
 }

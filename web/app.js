@@ -480,6 +480,8 @@
       '<tr><td>坡度</td><td>' + (isCW() ? -s.gradePct : s.gradePct).toFixed(1) + '%</td></tr>' +
       '<tr><td>縱向風</td><td>' + wind + '</td></tr>' +
       (gust ? '<tr><td>陣風</td><td>σ ' + d.gustSigmaMs.toFixed(1) + ' m/s</td></tr>' : '') +
+      ((s.kFactor && Math.abs(s.kFactor - 1) > 0.01)
+        ? '<tr><td>曝露度倍率</td><td>×' + s.kFactor.toFixed(2) + '</td></tr>' : '') +
       '<tr><td>反向同段</td><td>' + o.speedKmh.toFixed(1) + ' km/h</td></tr>' +
       '</table></div>';
   }
@@ -679,7 +681,9 @@
       return '<tr data-i="' + i + '"><td class="l">' + k0.toFixed(1) + '–' + k1.toFixed(1) + '</td>' +
         '<td class="l"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' +
         EXP[r.exposure].color + ';margin-right:4px"></span>' + EXP[r.exposure].name +
-        (r.phase ? ((isCW() ? r.phase !== 'climb' : r.phase === 'climb') ? '↑' : '↓') : '') + '</td>' +
+        (r.phase ? ((isCW() ? r.phase !== 'climb' : r.phase === 'climb') ? '↑' : '↓') : '') +
+        (r.kFactor && Math.abs(r.kFactor - 1) > 0.01
+          ? '<span style="color:var(--ink-muted)"> ×' + r.kFactor.toFixed(2) + '</span>' : '') + '</td>' +
         '<td>' + (tc / 60).toFixed(1) + '</td><td>' + (tcc / 60).toFixed(1) + '</td>' +
         '<td style="color:' + (dd > 0 ? '#0ca30c' : dd < 0 ? '#d03b3b' : 'inherit') + '">' +
         (dd >= 0 ? '+' : '') + dd.toFixed(0) + '</td></tr>';
@@ -752,12 +756,24 @@
       '各自分解成 u/v 後平均。<br>' +
       '<b>遮蔽比 ' + w.shelterRatio + '×</b>　開闊地風 ÷ 測站「純量」平均風速。' +
       '大於 1 代表測站受樹木建物遮蔽而讀低；此值就是把開闊地風折減成市區風的經驗佐證。<br>' +
+      '<b>河段倍率</b>　同屬河濱但風程差異很大，故各河段另乘一個倍率：' +
+      '基隆河 ×1.15（灘地開闊）、淡水河／新店溪 ×1.00、景美溪 ×0.70（谷窄避風）。' +
+      '這是騎乘者的實地體感 —— OSM 量得的水面半寬（淡水河 218 m、新店溪 84、' +
+      '基隆河 58、景美溪 15）只支持「景美溪最弱」，不支持「基隆河最強」；' +
+      '推測是因為決定風程的是無建物的開闊灘地而非水面，而這點缺乏土地覆蓋資料無法量化。<br>' +
       '<b>|D| 加權位移 ' + D.magnitudeKm + ' km</b>　D = Σ kᵢ·t̂ᵢ·Δsᵢ，把每一小段的行進方向' +
       '用曝露度係數加權後相加。閉環使 Σt̂Δs=0，所以 D 只取決於 k 的<b>差值</b>。' +
       '時間差正比於 W·D。<br>' +
       '<b>臨界風向 ' + D.criticalFromDeg.map((x) => x.toFixed(0) + '°').join(' / ') + '</b>　' +
       'W 與 D 垂直之處，兩個方向等價。風從 ' + D.ccwCenterFromDeg.toFixed(0) + '° 來時最該逆時針，' +
       '從 ' + D.cwCenterFromDeg.toFixed(0) + '° 來時最該順時針。<br><br>' +
+      '<b>陣風的定義</b>　氣象署以「10 分鐘平均」與「同時段內 3 秒平均的最大瞬間風」' +
+      '之差值判定：差值 ≥5 m/s 為小陣風、>10 m/s 為大陣風。' +
+      '但 Open-Meteo 的 wind_gusts_10m 是「前一小時最大」，取樣期間較長、' +
+      '尖峰因子較大（Davenport：10 分鐘 g≈3.3、1 小時 g≈3.8），兩者不能直接比。' +
+      '本模型先用 g=3.8 還原成 σ，再乘 3.3 換算回氣象署的 10 分鐘基準才套門檻。' +
+      '目前狀態：<b>' + (S.cond.wind.gustClass?.label ?? '—') + '</b>（差值 ' +
+      (S.cond.wind.gustClass?.excessMs ?? '—') + ' m/s）。<br><br>' +
       '<b>陣風為什麼逆風時特別痛苦</b>　陣風本身的效應是對稱的 —— 阻力正比於 ' +
       '(v+h)²，風速起伏 σ 讓平均阻力多出 ½ρCdA·σ²，與順逆風無關。' +
       '真正的不對稱來自<b>暴露時間</b>：定功率下逆風速度低（例如 18 vs 34 km/h），' +
@@ -1087,6 +1103,7 @@
       const last = S.runs[S.runs.length - 1];
       if (last && last.label === s.sectionLabel) { last.endKm = s.s1 / 1000; last.segs.push(s); }
       else S.runs.push({ exposure: s.exposure, label: s.sectionLabel, phase: s.phase,
+                         kFactor: s.kFactor ?? 1,
                          startKm: s.s0 / 1000, endKm: s.s1 / 1000, segs: [s] });
     }
     const M = S.route.meta;

@@ -90,17 +90,48 @@ export function makeBackground(omPoints, { power = 2, minKm = 0.3 } = {}) {
 /**
  * 由「尖峰陣風」推出風速起伏的標準差。
  *
- * 報告的陣風是尖峰值而非標準差，兩者以尖峰因子相連：peak ≈ mean + g·σ。
- * 10 分鐘期間取 3 秒陣風時 g ≈ 3（風工程的慣用值）。
+ * 尖峰與標準差以尖峰因子相連：peak ≈ mean + g·σ。g 取決於「取樣期間多長」
+ * —— 期間越長、取到極值的機會越多，g 就越大。Davenport 的尖峰因子：
+ *     g = √(2·ln(νT)) + 0.577/√(2·ln(νT))      ν ≈ 0.2 Hz（近地紊流）
+ *     T =  600 s（10 分鐘）-> νT=120 -> g ≈ 3.3
+ *     T = 3600 s（1 小時） -> νT=720 -> g ≈ 3.8
  *
- * 注意 CWA 測站的 PeakGustSpeed 取樣期間較長，算出的陣風因子偏高
- * （實測中位 2.79，而開闊地 3 秒陣風的典型值約 1.5-1.7）。因此這裡用
- * 模式的陣風，與模式的平均風同源、期間一致，較不會高估。
+ * 兩個來源的基準不同，不能共用同一個 g：
+ *   氣象署    10 分鐘平均 vs 同時段內 3 秒平均的最大瞬間風  -> g ≈ 3.3
+ *   Open-Meteo  wind_gusts_10m 文件載明為 "maximum of the preceding hour"
+ *               取樣期間是一小時而非十分鐘                  -> g ≈ 3.8
+ *
+ * 本模型用 Open-Meteo 的陣風（與模式平均風同源），故取 3.8。
+ * 先前誤用 3.0，把 σ 高估約 27%。
  */
-const GUST_PEAK_FACTOR = 3.0;
+export const GUST_PEAK_FACTOR_HOURLY = 3.8;   // Open-Meteo：前一小時最大
+export const GUST_PEAK_FACTOR_10MIN = 3.3;    // 氣象署：10 分鐘內 3 秒陣風
+
 function gustSigma(gustMs, meanMs) {
   if (!Number.isFinite(gustMs) || !Number.isFinite(meanMs)) return 0;
-  return Math.max(0, (gustMs - meanMs) / GUST_PEAK_FACTOR);
+  return Math.max(0, (gustMs - meanMs) / GUST_PEAK_FACTOR_HOURLY);
+}
+
+/**
+ * 氣象署的陣風分級。
+ *
+ * 定義在「10 分鐘平均與同時段最大瞬間風的差值」上：
+ *   差值 < 5 m/s   無陣風現象
+ *   5 ~ 10         小陣風
+ *   > 10           大陣風
+ *
+ * 但我們手上的陣風是「前一小時最大」，基準不同不能直接套門檻。
+ * 作法是先還原成 σ（除以 3.8），再換算回 10 分鐘基準的差值（乘 3.3），
+ * 這樣才是在跟氣象署同一個量上比較。
+ */
+export function cwaGustClass(sigmaMs) {
+  const excess10min = (sigmaMs || 0) * GUST_PEAK_FACTOR_10MIN;
+  return {
+    excessMs: +excess10min.toFixed(2),
+    level: excess10min >= 10 ? 'strong' : excess10min >= 5 ? 'mild' : 'none',
+    label: excess10min >= 10 ? '大陣風' : excess10min >= 5 ? '小陣風' : '無陣風現象',
+    basis: '已由前一小時最大(g=3.8)換算為氣象署的 10 分鐘基準(g=3.3)',
+  };
 }
 
 /** 依測站散佈密度推出 Barnes 的起始尺度 κ₀ = 5.052·(2Δn/π)² */

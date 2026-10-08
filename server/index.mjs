@@ -44,7 +44,7 @@ import {
   airDensity, openWindField, analyzeDirections, selfTest,
   toUV, toSpeedDir, loadParams, exposureDisplacement, solveSpeedMs, USER_TUNABLE,
 } from './wind-model.mjs';
-import { buildWindField } from './wind-field.mjs';
+import { buildWindField, cwaGustClass } from './wind-field.mjs';
 import { stationWetness, surfaceAlongRoute, applyRadarNow, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
 import { fetchRadar, fetchRadarAt, radarAlongRoute, echoCells, dbzToRainMmPerH, RADAR } from './radar.mjs';
 import { estimateMotion, nowcastRoute, NOWCAST } from './nowcast.mjs';
@@ -350,6 +350,8 @@ async function getConditions({ full = false, overrides = null } = {}) {
       gustSigmaMs: +(field.reduce((a, f) => a + (f.gustSigmaMs ?? 0), 0) / field.length).toFixed(2),
       gustFactor: +((om.points.reduce((a, p) => a + (p.current.gustMs ?? 0), 0) / om.points.length) /
                     Math.max(0.1, omVec.speedMs)).toFixed(2),
+      // 氣象署分級（已換算到其 10 分鐘基準，見 wind-field.mjs）
+      gustClass: cwaGustClass(field.reduce((a, f) => a + (f.gustSigmaMs ?? 0), 0) / field.length),
       obsTime: obs.stations[0]?.obsTime ?? null,
       modelTime: om.points[0]?.current?.time ?? null,
       // 風場的實際來源：沿路線等距取 SAMPLE_N 個點查 Open-Meteo，

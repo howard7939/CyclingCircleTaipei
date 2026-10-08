@@ -169,8 +169,9 @@ export function exposureDisplacement(segments, params = DEFAULT_PARAMS) {
   for (const s of segments) {
     const br = s.bearing * D2R;
     const de = Math.sin(br) * s.len, dn = Math.cos(br) * s.len;
-    const k = params.exposureK[s.exposure];
-    if (k === undefined) throw new Error('exposure "' + s.exposure + '" 沒有對應的 k 值');
+    const kB = params.exposureK[s.exposure];
+    if (kB === undefined) throw new Error('exposure "' + s.exposure + '" 沒有對應的 k 值');
+    const k = kB * (s.kFactor ?? 1);
     e += k * de; n += k * dn;
     const c = (byClass[s.exposure] ||= { e: 0, n: 0, km: 0 });
     c.e += de; c.n += dn; c.km += s.len / 1000;
@@ -398,8 +399,10 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
     for (let i = 0; i < segments.length; i++) {
       const s = segments[i];
       const w = field[i];
-      const k = params.exposureK[s.exposure];
-      if (k === undefined) throw new Error('路段 ' + i + ' 的 exposure "' + s.exposure + '" 沒有對應的 k 值');
+      const kBase = params.exposureK[s.exposure];
+      if (kBase === undefined) throw new Error('路段 ' + i + ' 的 exposure "' + s.exposure + '" 沒有對應的 k 值');
+      // kFactor：同類別內的河段差異（基隆河灘地開闊、景美溪谷窄）
+      const k = kBase * (s.kFactor ?? 1);
 
       const br = (s.bearing + (sign > 0 ? 0 : 180)) * D2R;
       const tx = Math.sin(br), ty = Math.cos(br);
