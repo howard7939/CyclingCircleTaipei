@@ -48,6 +48,7 @@ import { buildWindField } from './wind-field.mjs';
 import { stationWetness, surfaceAlongRoute, applyRadarNow, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
 import { fetchRadar, fetchRadarAt, radarAlongRoute, echoCells, dbzToRainMmPerH, RADAR } from './radar.mjs';
 import { estimateMotion, nowcastRoute, NOWCAST } from './nowcast.mjs';
+import { pruneCache, RETENTION } from './cache.mjs';
 
 // 雷達的 8.5 MB 下載時間 2-27 秒不等（取決於對方伺服器負載，實測變動很大，
 // 且該 API 不支援空間子集、也不壓縮），不能每次請求都等它。
@@ -281,6 +282,52 @@ async function getConditions({ full = false, overrides = null } = {}) {
     if (x.level === 'damp') dampKm += segs[i].len / 1000;
   });
 
+  // ---------- 未來展望：臨近預報（60 分鐘）之外的尺度 ----------
+  // 這份逐時資料本來就為了乾燥模型而抓，順手接出來即可，零額外 API 成本。
+  // 臨近預報回答「現在出門會不會淋到」，展望回答「今天下午/明天適不適合騎」。
+  const outlookHours = (() => {
+    const t0 = Date.now();
+    const rows = hourly
+      .filter((h) => {
+        const t = new Date(h.time + ':00+08:00').getTime();
+        return t >= t0 - 3600e3 && t <= t0 + 24 * 3600e3;
+      })
+      .map((h) => ({
+        time: h.time,
+        precipMm: h.precipMm ?? 0,
+        precipProb: h.precipProb ?? null,
+        uvIndex: h.uvIndex ?? 0,
+        tempC: h.tempC ?? null,
+        windMs: h.windMs ?? null,
+        windFromDeg: h.windFromDeg ?? null,
+      }));
+    const rainy = rows.filter((r) => r.precipMm > 0.05 || (r.precipProb ?? 0) >= 30);
+    const totalMm = rows.reduce((a, r) => a + r.precipMm, 0);
+    const maxProb = Math.max(0, ...rows.map((r) => r.precipProb ?? 0));
+    const peakUv = rows.reduce((a, r) => (r.uvIndex > (a?.uvIndex ?? -1) ? r : a), null);
+    // 最接近的「乾爽時段」：連續 2 小時以上無雨、降雨機率 < 30%
+    let bestRun = null, run = null;
+    for (const r of rows) {
+      const dry = r.precipMm <= 0.05 && (r.precipProb ?? 0) < 30;
+      if (dry) { run = run || { from: r.time, n: 0 }; run.n++; run.to = r.time; }
+      else { if (run && (!bestRun || run.n > bestRun.n)) bestRun = run; run = null; }
+    }
+    if (run && (!bestRun || run.n > bestRun.n)) bestRun = run;
+    return {
+      hours: rows,
+      summary: {
+        hoursAhead: rows.length,
+        totalRainMm: +totalMm.toFixed(1),
+        maxPrecipProb: maxProb,
+        rainyHours: rainy.length,
+        firstRainy: rainy.length ? rainy[0].time : null,
+        peakUv: peakUv ? { time: peakUv.time, uvIndex: +peakUv.uvIndex.toFixed(1) } : null,
+        longestDryRun: bestRun ? { from: bestRun.from, to: bestRun.to, hours: bestRun.n } : null,
+      },
+      source: 'Open-Meteo 逐時預報（與乾燥模型同一份資料，未另外呼叫 API）',
+    };
+  })();
+
   // ---------- 紫外線：騎乘期間的劑量 ----------
   const rideH = analysis.directions[analysis.recommend || 'CCW'].timeS / 3600;
   const uvNow = uvAnalysis(hourly, nowIso, rideH);
@@ -365,6 +412,7 @@ async function getConditions({ full = false, overrides = null } = {}) {
     },
     radar,
     nowcast: nowcast.available ? { ...nowcast, _perSeg: undefined } : nowcast,
+    outlook: outlookHours,
     surface: {
       wetKm: +wetKm.toFixed(1), dampKm: +dampKm.toFixed(1),
       dryKm: +(surfLevels.dry).toFixed(1),
@@ -426,6 +474,9 @@ async function getConditions({ full = false, overrides = null } = {}) {
   }
   return out;
 }
+
+// 啟動時先清一次：隔了幾天再開時，舊的影格與快照已毫無用處
+pruneCache(resolve(ROOT, 'data/cache'), { quiet: false }).catch(() => {});
 
 const server = createServer(async (req, res) => {
   const t0 = Date.now();

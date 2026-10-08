@@ -809,6 +809,7 @@
     renderRadarCard();
     renderNowcastCard();
     renderUvChart();
+    renderOutlook();
   }
 
   function renderRadarCard() {
@@ -840,10 +841,14 @@
     const svg = $('uvChart');
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     const uv = S.cond.uv;
-    // 夜間時騎乘期間全是 0，改畫未來 24 小時展望
-    const night = uv.isNight && (uv.outlookHours || []).length > 2;
-    const hrs = night ? uv.outlookHours : (uv.hours || []);
-    if (!hrs.length) return;
+    // 夜間時騎乘期間的 UV 全是 0。原本改畫 24 小時展望，但「未來 24 小時展望」
+    // 區塊已經有同一條 UV 曲線了 —— 重複呈現同一份資料只會佔版面。
+    // 故夜間直接隱藏本圖，把 UV 展望交給下方的展望區塊。
+    if (uv.isNight && S.cond.outlook?.hours?.length) { svg.style.display = 'none'; return; }
+    svg.style.display = 'block';
+    const hrs = uv.hours || [];
+    if (!hrs.length) { svg.style.display = 'none'; return; }
+    const night = false;
 
     const W = 300, H = 78, P = { t: 6, r: 8, b: 16, l: 20 };
     const iw = W - P.l - P.r, ih = H - P.t - P.b;
@@ -942,6 +947,81 @@
     }
     const lb = mk('text', { x: P.l + 2, y: P.t + 8, 'font-size': 10, fill: '#898781' });
     lb.textContent = '路線上降雨里程（km）vs 分鐘後';
+    svg.appendChild(lb);
+  }
+
+
+  /**
+   * 未來 24 小時展望。臨近預報只到 60 分鐘，這一段回答的是
+   * 「今天下午／明天適不適合騎」。資料與乾燥模型共用，未另外呼叫 API。
+   */
+  function renderOutlook() {
+    const o = S.cond.outlook, host = $('outlookCard'), svg = $('olChart');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    if (!o || !o.hours?.length) { host.innerHTML = ''; return; }
+    const sm = o.summary;
+    const dry = sm.longestDryRun;
+    const cls = sm.maxPrecipProb >= 60 ? 'bad' : sm.maxPrecipProb >= 30 ? 'alert' : '';
+    host.innerHTML =
+      '<div class="sc-row"><div class="sc ' + cls + '">' +
+      '<div class="k">未來 24 小時展望</div>' +
+      '<div class="v">' + (sm.rainyHours
+        ? sm.rainyHours + ' 小時可能有雨'
+        : '無降雨跡象') + '</div>' +
+      '<div class="s">' +
+      '最高降雨機率 ' + sm.maxPrecipProb + '%' +
+      (sm.totalRainMm > 0 ? ' · 累積 ' + sm.totalRainMm + ' mm' : '') +
+      (sm.firstRainy ? ' · 最早 ' + sm.firstRainy.slice(5, 16).replace('T', ' ') : '') +
+      (sm.peakUv && sm.peakUv.uvIndex > 0.5
+        ? '<br>UV 高峰 ' + sm.peakUv.uvIndex + ' @ ' + sm.peakUv.time.slice(11, 16) : '') +
+      // 涵蓋整個展望期間時顯示起訖反而困惑（會變成 02:00–02:00 跨日），直接說整段
+      (dry && dry.hours >= sm.hoursAhead - 1
+        ? '<br>整個展望期間都沒有降雨跡象'
+        : dry && dry.hours >= 3
+          ? '<br>最長乾爽時段 ' + dry.hours + ' 小時（' +
+            dry.from.slice(5, 16).replace('T', ' ') + ' 起）'
+          : '') +
+      '</div></div></div>';
+
+    // 圖：降雨機率長條 + UV 折線（雙軸，共用時間軸）
+    const H = o.hours;
+    const W = 300, Ht = 92, P = { t: 10, r: 22, b: 16, l: 22 };
+    const iw = W - P.l - P.r, ih = Ht - P.t - P.b;
+    const bw = iw / H.length;
+    const x = (i) => P.l + i * bw;
+    const yP = (v) => P.t + ih - (v / 100) * ih;
+    const uvMax = Math.max(3, ...H.map((h) => h.uvIndex));
+    const yU = (v) => P.t + ih - (v / uvMax) * ih;
+
+    svg.appendChild(mk('line', { x1: P.l, x2: P.l + iw, y1: yP(0), y2: yP(0), stroke: '#c3c2b7' }));
+    for (const v of [50, 100]) {
+      svg.appendChild(mk('line', { x1: P.l, x2: P.l + iw, y1: yP(v), y2: yP(v),
+                                   stroke: '#e1e0d9', 'stroke-dasharray': '3 2' }));
+      const t = mk('text', { class: 'ax', x: P.l - 3, y: yP(v) + 3, 'text-anchor': 'end' });
+      t.textContent = v; svg.appendChild(t);
+    }
+    for (let i = 0; i < H.length; i++) {
+      const p = H[i].precipProb ?? 0;
+      if (p > 0) {
+        svg.appendChild(mk('rect', { x: x(i) + .4, y: yP(p), width: Math.max(.8, bw - .8),
+                                     height: yP(0) - yP(p), fill: '#2a78d6', 'fill-opacity': .55 }));
+      }
+      if (H[i].precipMm > 0.05) {
+        svg.appendChild(mk('rect', { x: x(i) + .4, y: yP(0) + 1, width: Math.max(.8, bw - .8),
+                                     height: 3, fill: '#0d366b' }));
+      }
+    }
+    const d = 'M' + H.map((h, i) => (x(i) + bw / 2).toFixed(1) + ',' + yU(h.uvIndex).toFixed(1)).join('L');
+    svg.appendChild(mk('path', { d, fill: 'none', stroke: '#eda100', 'stroke-width': 1.8 }));
+    const ut = mk('text', { class: 'ax', x: P.l + iw + 3, y: yU(uvMax) + 3, 'text-anchor': 'start', fill: '#eda100' });
+    ut.textContent = 'UV' + uvMax.toFixed(0); svg.appendChild(ut);
+
+    for (let i = 0; i < H.length; i += 6) {
+      const t = mk('text', { class: 'ax', x: x(i) + bw / 2, y: Ht - 4, 'text-anchor': 'middle' });
+      t.textContent = H[i].time.slice(11, 13); svg.appendChild(t);
+    }
+    const lb = mk('text', { x: P.l + 1, y: P.t - 2, 'font-size': 9.5, fill: '#898781' });
+    lb.textContent = '降雨機率 % · 深藍條＝實際雨量 · 橘線＝UV';
     svg.appendChild(lb);
   }
 

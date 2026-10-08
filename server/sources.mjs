@@ -13,6 +13,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pruneCache } from './cache.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE_DIR = join(ROOT, 'data/cache');
@@ -262,8 +263,11 @@ export async function cwaRainAt(when, bbox, { diskOnly = false } = {}) {
   }
   const data = { obsTime: d.toISOString(), stampHour: stamp, stations: out,
                  _ms: Date.now() - t0, _kb: Math.round(xml.length / 1024) };
-  try { await mkdir(CACHE_DIR, { recursive: true }); await writeFile(file, JSON.stringify(data)); }
-  catch (e) { console.warn('[cache] 雨量快照寫入失敗：' + e.message); }
+  try {
+    await mkdir(CACHE_DIR, { recursive: true });
+    await writeFile(file, JSON.stringify(data));
+    await pruneCache(CACHE_DIR);        // 否則每小時一筆、無限累積
+  } catch (e) { console.warn('[cache] 雨量快照寫入失敗：' + e.message); }
   return { ...data, _cache: 'miss' };
 }
 

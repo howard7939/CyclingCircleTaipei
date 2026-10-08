@@ -30,7 +30,8 @@
  *   3. dBZ 不等於地面雨量。Marshall-Palmer 關係本身有 2 倍以上不確定度，
  *      另有雨幡（雨在落地前蒸發）與亮帶污染。
  */
-import { readFile, writeFile, mkdir, readdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { pruneCache } from './cache.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,7 +45,6 @@ export const RADAR = {
   // 子網格外擴範圍。臨近預報要看到「還沒到、但正在接近」的回波，
   // 1.0° 約 110 km，在 60 km/h 的移速下相當於約 110 分鐘的前置量。
   subBufferDeg: 1.0,
-  keepFrames: 8,          // 保留的歷史影格數（第二階段臨近預報要用）
   noEcho: -99,
   outOfRange: -999,
   echoThresholdDbz: 5,    // 低於此值視為無降水意義
@@ -159,6 +159,8 @@ export async function fetchRadarAt(when, bbox, { diskOnly = false } = {}) {
   frame.timing = { fetchMs: tFetch, payloadKB: Math.round(xml.length / 1024) };
   frame.historical = true;
   await writeFile(file, JSON.stringify(frame));
+  // 歷史影格原本直接 writeFile，繞過了 saveFrame 的清理，會無限累積。
+  await pruneCache(join(ROOT, 'data/cache')).catch(() => {});
   return { ...frame, cache: 'miss' };
 }
 
@@ -201,15 +203,12 @@ const isoStamp = (d) => {
          p2(d.getHours()) + p2(d.getMinutes());
 };
 
-/** 保留最近數張影格，供移動向量估計使用 */
+/** 寫入影格並套用保留策略（見 cache.mjs） */
 async function saveFrame(frame) {
   await mkdir(FRAME_DIR, { recursive: true });
   const stamp = isoStamp(new Date(frame.obsTime));
   await writeFile(join(FRAME_DIR, 'frame-' + stamp + '.json'), JSON.stringify(frame));
-  const files = (await readdir(FRAME_DIR)).filter((f) => f.startsWith('frame-')).sort();
-  for (const f of files.slice(0, Math.max(0, files.length - RADAR.keepFrames))) {
-    await unlink(join(FRAME_DIR, f)).catch(() => {});
-  }
+  await pruneCache(join(ROOT, 'data/cache')).catch(() => {});
 }
 
 /** 取某座標的 dBZ。回傳 null 代表不在子網格內。 */
