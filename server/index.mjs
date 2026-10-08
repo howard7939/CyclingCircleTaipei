@@ -14,8 +14,8 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cwaStations, cwaRain, cwaUv, openMeteo } from './sources.mjs';
 import {
-  DEFAULT_PARAMS, airDensity, buildSpeedCurve, openWindField,
-  analyzeDirections, selfTest, toUV, toSpeedDir,
+  DEFAULT_PARAMS, airDensity, buildSpeedCurve, openWindField, analyzeDirections,
+  selfTest, toUV, toSpeedDir, loadParams, exposureDisplacement,
 } from './wind-model.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -123,10 +123,14 @@ async function getConditions({ full = false } = {}) {
 
   const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 
-  const params = { ...DEFAULT_PARAMS, rho: +airDensity(tempC, 1013).toFixed(3) };
+  const params = { ...loadParams({ quiet: true }), rho: +airDensity(tempC, 1013).toFixed(3) };
   const field = openWindField(segs, om.points);
   const analysis = analyzeDirections(segs, field, M.gpxOrientation, params, route._curve);
   const noise = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg });
+  const D = exposureDisplacement(segs, params);
+  // 零風基準：與天氣完全無關的方向偏好（上下坡換邊的速度不對稱）
+  const calm = analyzeDirections(segs, segs.map(() => ({ u: 0, v: 0, speedMs: 0, fromDeg: 0, gustMs: 0 })),
+                                 M.gpxOrientation, params, route._curve);
 
   const rs = rain.stations.filter((s) => s.hr1 != null);
   const out = {
@@ -153,6 +157,9 @@ async function getConditions({ full = false } = {}) {
       noiseFloorKJ: +Math.abs(noise.deltaKJ).toFixed(3),
       snr: +(Math.abs(analysis.deltaKJ) / Math.max(1e-6, Math.abs(noise.deltaKJ))).toFixed(0),
       contributionKJ: analysis.contributionKJ,
+      calmDeltaKJ: calm.deltaKJ,
+      windDeltaKJ: +(analysis.deltaKJ - calm.deltaKJ).toFixed(1),
+      exposureDisplacement: D,
       byDirection: Object.fromEntries(Object.entries(analysis.directions).map(([k, v]) => [k, {
         aeroWorkKJ: v.aeroWorkKJ, timeMin: v.timeMin, byExposure: v.byExposure,
       }])),

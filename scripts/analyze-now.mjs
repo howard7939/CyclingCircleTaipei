@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { cwaStations, cwaRain, cwaUv, openMeteo } from '../server/sources.mjs';
 import {
   DEFAULT_PARAMS, airDensity, buildSpeedCurve, openWindField,
-  analyzeDirections, selfTest, toUV, toSpeedDir,
+  analyzeDirections, selfTest, toUV, toSpeedDir, loadParams, exposureDisplacement,
 } from '../server/wind-model.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -108,7 +108,8 @@ console.log('  速度 ' + [-8, -5, -3, -1, 0, 1, 3, 5, 8].map((g) => pad(curve.s
 
 // ---------- 4. 風場與方向分析 ----------
 const tempC = low.length ? low.reduce((a, s) => a + (s.tempC ?? 25), 0) / low.length : 25;
-const params = { ...DEFAULT_PARAMS, rho: +airDensity(tempC, 1013).toFixed(3) };
+const params = { ...loadParams(), rho: +airDensity(tempC, 1013).toFixed(3) };
+const D = exposureDisplacement(segs, params);
 const field = openWindField(segs, om.points);
 const res = analyzeDirections(segs, field, M.gpxOrientation, params, curve);
 
@@ -118,7 +119,24 @@ console.log('=== 4. 開闊地風場（內插到 ' + segs.length + ' 段） ===')
 console.log('  風速範圍 ' + Math.min(...fs_).toFixed(2) + ' – ' + Math.max(...fs_).toFixed(2) + ' m/s' +
             '（空間變化 ' + (100 * (Math.max(...fs_) - Math.min(...fs_)) / (fs_.reduce((a, b) => a + b, 0) / fs_.length)).toFixed(0) + '%）');
 console.log('  空氣密度 ' + params.rho + ' kg/m³（氣溫 ' + tempC.toFixed(1) + ' °C）');
-console.log('  曝露度係數 ' + Object.entries(params.exposureK).map(([k, v]) => NAME[k] + ' ' + v).join('、'));
+console.log('  曝露度係數 ' + Object.entries(params.exposureK).map(([k, v]) => NAME[k] + ' ' + v).join('、') +
+            '   來源 ' + (params._paramSource || '內建預設'));
+
+console.log('');
+console.log('=== 4b. 曝露度加權位移向量 D = Σ kᵢ t̂ᵢ Δsᵢ ===');
+console.log('  各類別淨位移（逆時針行進）：');
+for (const ex of ['riverside', 'urban', 'mountain']) {
+  const c = D.byClass[ex];
+  if (!c) continue;
+  console.log('    ' + NAME[ex] + ' ' + pad(c.km.toFixed(1), 5) + ' km   東 ' + pad(c.east.toFixed(3), 8) +
+              '   北 ' + pad(c.north.toFixed(3), 8) + ' km   |v| ' + pad(c.magnitudeKm.toFixed(3), 7) +
+              ' km @ ' + pad(c.bearingDeg.toFixed(0), 4) + '°');
+}
+console.log('  D = 東 ' + D.east.toFixed(0) + ' m, 北 ' + D.north.toFixed(0) + ' m   |D| = ' +
+            D.magnitudeKm.toFixed(3) + ' km   方位 ' + D.bearingDeg.toFixed(1) + '°');
+console.log('  風從 ' + D.ccwCenterFromDeg.toFixed(0) + '° 來時最該逆時針；從 ' +
+            D.cwCenterFromDeg.toFixed(0) + '° 來時最該順時針');
+console.log('  臨界風向（此時兩方向等價）：' + D.criticalFromDeg.map((x) => x.toFixed(0) + '°').join(' 與 '));
 
 console.log('');
 console.log('=== 5. 方向分析 ===');

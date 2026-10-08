@@ -11,8 +11,13 @@
  *   三者的不均勻性。本模組以 selfTest() 數值驗證這個恆等式。
  */
 
+import { readFileSync, existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 const D2R = Math.PI / 180, R2D = 180 / Math.PI;
 const R_EARTH = 6371008.8;
+const PARAMS_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../data/model-params.json');
 
 /**
  * 曝露度係數 k：騎士實際感受到的風速 / 模式的開闊地 10 m 風速。
@@ -44,6 +49,94 @@ export const DEFAULT_PARAMS = {
   // 偏好」是嚴格恆等式；開啟後僅近似成立（差異即 yaw 項的貢獻）。
   yawCorrection: true,
 };
+
+/**
+ * 載入 data/model-params.json 的覆寫值（若不存在則用預設）。
+ * 大聲驗證：型別錯誤或缺曝露度類別一律 throw，不要靜默回退到預設值，
+ * 否則使用者改了檔案卻沒生效、而且不會知道。
+ */
+export function loadParams({ file = PARAMS_FILE, quiet = false } = {}) {
+  if (!existsSync(file)) return { ...DEFAULT_PARAMS, _source: 'defaults' };
+
+  let raw;
+  try { raw = JSON.parse(readFileSync(file, 'utf8')); }
+  catch (e) { throw new Error(file + ' 不是合法 JSON：' + e.message); }
+
+  const p = { ...DEFAULT_PARAMS };
+  if (raw.exposureK !== undefined) {
+    if (typeof raw.exposureK !== 'object' || raw.exposureK === null) {
+      throw new Error('model-params.json 的 exposureK 必須是物件');
+    }
+    for (const cls of ['riverside', 'urban', 'mountain']) {
+      const v = raw.exposureK[cls];
+      if (v === undefined) throw new Error('model-params.json 的 exposureK 缺少 "' + cls + '"');
+      if (!Number.isFinite(v) || v < 0 || v > 3) {
+        throw new Error('model-params.json 的 exposureK.' + cls + ' = ' + JSON.stringify(v) +
+                        '，必須是 0~3 的數字');
+      }
+    }
+    p.exposureK = { ...raw.exposureK };
+  }
+  for (const key of ['rho', 'cdaM2', 'crr', 'massKg', 'minSpeedKmh', 'maxSpeedKmh']) {
+    if (raw[key] === undefined) continue;
+    if (!Number.isFinite(raw[key]) || raw[key] <= 0) {
+      throw new Error('model-params.json 的 ' + key + ' = ' + JSON.stringify(raw[key]) + '，必須是正數');
+    }
+    p[key] = raw[key];
+  }
+  if (raw.yawCorrection !== undefined) {
+    if (typeof raw.yawCorrection !== 'boolean') throw new Error('model-params.json 的 yawCorrection 必須是 true/false');
+    p.yawCorrection = raw.yawCorrection;
+  }
+
+  const ks = Object.values(p.exposureK);
+  if (Math.max(...ks) - Math.min(...ks) < 1e-9 && !quiet) {
+    console.warn('[warn] 三個 exposureK 相等 -> D = 0，方向偏好將恆為零（僅剩側風 yaw 的微量效應）。');
+  }
+  p._source = file;
+  p._paramSource = raw.source ?? null;
+  return p;
+}
+
+/**
+ * 曝露度加權位移向量 D = Σ kᵢ t̂ᵢ Δsᵢ（t̂ 取 segments 索引順序的行進方向）。
+ *
+ * 由閉環恆等式 Σ t̂ᵢΔsᵢ = 0，D 對 k 整體加常數不變，只取決於 k 之間的差值。
+ * 方向判斷 ΔW ∝ W·D，所以 D 的方位角決定了「順逆時針的臨界風向」。
+ */
+export function exposureDisplacement(segments, params = DEFAULT_PARAMS) {
+  let e = 0, n = 0;
+  const byClass = {};
+  for (const s of segments) {
+    const br = s.bearing * D2R;
+    const de = Math.sin(br) * s.len, dn = Math.cos(br) * s.len;
+    const k = params.exposureK[s.exposure];
+    if (k === undefined) throw new Error('exposure "' + s.exposure + '" 沒有對應的 k 值');
+    e += k * de; n += k * dn;
+    const c = (byClass[s.exposure] ||= { e: 0, n: 0, km: 0 });
+    c.e += de; c.n += dn; c.km += s.len / 1000;
+  }
+  const magM = Math.hypot(e, n);
+  const bearingDeg = (Math.atan2(e, n) * R2D + 360) % 360;
+  // ΔW ≡ W(CW) − W(CCW) ∝ W·D，W 為風「吹向」的向量；風的「來向」= 吹向 + 180°。
+  // 風「來向」正好等於 D 的方位時 W 與 D 反向 -> ΔW<0 -> 順時針最省；
+  // 風「來向」為 D 的反方向時最有利於逆時針。臨界在兩者之間 ±90°。
+  const crit = [(bearingDeg + 90 + 180) % 360, (bearingDeg - 90 + 180 + 360) % 360];
+  return {
+    east: +e.toFixed(1), north: +n.toFixed(1),
+    magnitudeKm: +(magM / 1000).toFixed(3),
+    bearingDeg: +bearingDeg.toFixed(1),
+    ccwCenterFromDeg: +((bearingDeg + 180) % 360).toFixed(1), // 風從這個方位來時最該逆時針
+    cwCenterFromDeg: +bearingDeg.toFixed(1),                   // 風從這個方位來時最該順時針
+    criticalFromDeg: crit.map((x) => +x.toFixed(1)).sort((a, b) => a - b),
+    byClass: Object.fromEntries(Object.entries(byClass).map(([k, v]) => [k, {
+      km: +v.km.toFixed(2),
+      east: +(v.e / 1000).toFixed(3), north: +(v.n / 1000).toFixed(3),
+      magnitudeKm: +(Math.hypot(v.e, v.n) / 1000).toFixed(3),
+      bearingDeg: +((Math.atan2(v.e, v.n) * R2D + 360) % 360).toFixed(1),
+    }])),
+  };
+}
 
 /** 依氣溫/氣壓修正空氣密度 */
 export function airDensity(tempC, pressureHpa) {
