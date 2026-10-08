@@ -222,10 +222,15 @@ export async function openMeteo(points, { hours = 24 } = {}) {
     const qs = new URLSearchParams({
       latitude: points.map((p) => p.lat.toFixed(4)).join(','),
       longitude: points.map((p) => p.lon.toFixed(4)).join(','),
-      current: 'wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,temperature_2m,relative_humidity_2m,uv_index,is_day',
-      hourly: 'wind_speed_10m,wind_direction_10m,precipitation,precipitation_probability,uv_index,temperature_2m',
+      current: 'wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,temperature_2m,' +
+               'relative_humidity_2m,uv_index,is_day,shortwave_radiation',
+      // 過去 24 小時的逐時資料是路面乾燥模型的輸入：要把蒸發量積分回來，
+      // 就需要當時的日射、風、濕度、氣溫，而不是只有現在的值。
+      hourly: 'wind_speed_10m,wind_direction_10m,precipitation,precipitation_probability,' +
+              'uv_index,uv_index_clear_sky,temperature_2m,relative_humidity_2m,shortwave_radiation,is_day',
       wind_speed_unit: 'ms',
       timezone: 'Asia/Taipei',
+      past_days: '1',
       forecast_days: '2',
     });
     const { json, ms, bytes } = await fetchRetry(OM_BASE + '?' + qs, { label: 'Open-Meteo', timeout: 60000 });
@@ -249,16 +254,21 @@ export async function openMeteo(points, { hours = 24 } = {}) {
           tempC: o.current?.temperature_2m ?? null,
           rh: o.current?.relative_humidity_2m ?? null,
           uvIndex: o.current?.uv_index ?? null,
+          swRadWm2: o.current?.shortwave_radiation ?? null,
           isDay: o.current?.is_day === 1,
         },
-        hourly: (o.hourly?.time || []).slice(0, hours).map((t, k) => ({
+        hourly: (o.hourly?.time || []).map((t, k) => ({
           time: t,
           windMs: o.hourly.wind_speed_10m?.[k] ?? null,
           windFromDeg: o.hourly.wind_direction_10m?.[k] ?? null,
           precipMm: o.hourly.precipitation?.[k] ?? null,
           precipProb: o.hourly.precipitation_probability?.[k] ?? null,
           uvIndex: o.hourly.uv_index?.[k] ?? null,
+          uvClear: o.hourly.uv_index_clear_sky?.[k] ?? null,
           tempC: o.hourly.temperature_2m?.[k] ?? null,
+          rh: o.hourly.relative_humidity_2m?.[k] ?? null,
+          swRadWm2: o.hourly.shortwave_radiation?.[k] ?? null,
+          isDay: o.hourly.is_day?.[k] === 1,
         })),
       })),
       _ms: ms, _kb: Math.round(bytes / 1024),

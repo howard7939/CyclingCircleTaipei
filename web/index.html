@@ -63,6 +63,13 @@
         font-size:10px;cursor:help;margin-left:5px;vertical-align:1px}
   .note{font-size:11.5px;color:var(--ink-muted);line-height:1.55;margin-top:8px}
   .note b{color:var(--ink-2);font-weight:600}
+  .sc-row{display:flex;gap:8px;margin-bottom:8px}
+  .sc{flex:1;background:var(--plane);border-radius:7px;padding:7px 9px}
+  .sc .k{font-size:11px;color:var(--ink-muted)}
+  .sc .v{font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.25}
+  .sc .s{font-size:11px;color:var(--ink-2);font-variant-numeric:tabular-nums}
+  .sc.alert{box-shadow:inset 0 0 0 1.5px var(--warn)}
+  .sc.bad{box-shadow:inset 0 0 0 1.5px var(--crit)}
 
   .modes{display:flex;border:1px solid var(--hair);border-radius:7px;overflow:hidden;flex-wrap:wrap}
   .modes button{flex:1 1 44%;padding:7px 4px;font:inherit;font-size:12px;cursor:pointer;
@@ -174,6 +181,7 @@
       <h2 style="margin-top:16px">著色依據</h2>
       <div class="modes" id="modes">
         <button data-mode="wind" aria-pressed="true">順逆風</button>
+        <button data-mode="surface" aria-pressed="false">路面濕度</button>
         <button data-mode="exposure" aria-pressed="false">曝露度</button>
         <button data-mode="grade" aria-pressed="false">坡度</button>
       </div>
@@ -222,6 +230,13 @@
     </div>
 
     <div class="sec">
+      <h2>路面與紫外線</h2>
+      <div id="surfCard"></div>
+      <svg id="uvChart" viewBox="0 0 300 78" style="width:100%;display:block;margin-top:10px"></svg>
+      <div class="note" id="surfHelp"></div>
+    </div>
+
+    <div class="sec">
       <h2>風向與臨界方位</h2>
       <div class="note" id="windHelp"></div>
       <svg id="compass" viewBox="0 0 220 220" style="width:100%;max-width:230px;display:block;margin:0 auto"></svg>
@@ -236,7 +251,7 @@
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;margin-top:6px">
         <input type="checkbox" id="tStations"> 氣象測站</label>
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;margin-top:6px">
-        <input type="checkbox" id="tRain" checked> 降雨中的雨量站</label>
+        <input type="checkbox" id="tRain" checked> 雨量站（圈大小＝水膜厚度）</label>
     </div>
 
     <div class="sec">

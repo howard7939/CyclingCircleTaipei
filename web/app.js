@@ -19,6 +19,13 @@
     { max:  3.0,     color: '#e34948', label: '逆風 1.5 ~ 3' },
     { max:  Infinity, color: '#a32a2a', label: '強逆風 > 3' },
   ];
+  // 路面水膜是「量值」而非雙極量，依規則用單一色調的序列色階（淺→深）
+  const SURF_BINS = [
+    { max: 0.05,     color: '#e1e0d9', label: '乾 < 0.05 mm' },
+    { max: 0.15,     color: '#b7d3f6', label: '潮濕 0.05–0.15' },
+    { max: 0.30,     color: '#5598e7', label: '濕 0.15–0.30' },
+    { max: Infinity, color: '#184f95', label: '很濕 > 0.30 mm' },
+  ];
   const GRADE_BINS = [
     { max: -6,       color: '#184f95', label: '≤ −6%' },
     { max: -3,       color: '#2a78d6', label: '−6 ~ −3%' },
@@ -95,6 +102,7 @@
     const s = S.route.segments[i], c = S.cond.segments[i];
     if (S.color === 'exposure') return EXP[s.exposure].color;
     if (S.color === 'grade') return binOf(GRADE_BINS, s.gradePct).color;
+    if (S.color === 'surface') return binOf(SURF_BINS, c.surf ? c.surf.filmMm : 0).color;
     return binOf(WIND_BINS, c[dirKey()].headwindMs).color;
   }
   const dirKey = () => (S.dir === 'CW' ? 'cw' : 'ccw');
@@ -150,9 +158,9 @@
       }
       return;
     }
-    const bins = S.color === 'grade' ? GRADE_BINS : WIND_BINS;
-    const val = S.color === 'grade'
-      ? ((i) => segs[i].gradePct)
+    const bins = S.color === 'grade' ? GRADE_BINS : S.color === 'surface' ? SURF_BINS : WIND_BINS;
+    const val = S.color === 'grade' ? ((i) => segs[i].gradePct)
+      : S.color === 'surface' ? ((i) => (S.cond.segments[i].surf ? S.cond.segments[i].surf.filmMm : 0))
       : ((i) => S.cond.segments[i][dirKey()].headwindMs);
     let prev = -Infinity;
     for (const b of bins) {
@@ -162,7 +170,8 @@
         if (v > prev && v <= b.max) km += segs[i].len / 1000;
       }
       prev = b.max;
-      if (km > 0.05) add(b.color, b.label + (S.color === 'grade' ? '' : ' m/s'), km.toFixed(1) + ' km');
+      const unit = S.color === 'grade' || S.color === 'surface' ? '' : ' m/s';
+      if (km > 0.05) add(b.color, b.label + unit, km.toFixed(1) + ' km');
     }
   }
 
@@ -330,12 +339,23 @@
     }
 
     S.rainLayer.clearLayers();
-    for (const r of (S.cond.rain.wettest || [])) {
+    for (const r of (S.cond.surface?.wettest || [])) {
+      const col = binOf(SURF_BINS, r.filmMm).color;
       S.rainLayer.addLayer(
-        L.circleMarker([r.lat, r.lon], { radius: 5 + Math.min(8, r.hr1 * 2), color: '#fff', weight: 1.5,
-                                         fillColor: '#2a78d6', fillOpacity: .75 })
-          .bindTooltip(r.name + '　1hr ' + r.hr1 + ' mm　6hr ' + (r.hr6 ?? '—') + ' mm<br>' + r.area,
-                       { direction: 'top' }));
+        L.circleMarker([r.lat, r.lon], {
+          radius: 4 + Math.min(9, r.filmMm * 22),
+          color: r.rainingNow ? '#d03b3b' : '#fff', weight: r.rainingNow ? 2.5 : 1.5,
+          fillColor: col, fillOpacity: .85,
+        }).bindTooltip(
+          '<div class="tip"><div class="h">' + r.name + (r.rainingNow ? '　<b style="color:#d03b3b">降雨中</b>' : '') +
+          '</div><table>' +
+          '<tr><td>水膜</td><td>' + r.filmMm.toFixed(3) + ' mm（' +
+            ({ wet: '濕', damp: '潮濕', dry: '乾' }[r.level]) + '）</td></tr>' +
+          '<tr><td>雨量 1/6/24hr</td><td>' + r.hr1 + ' / ' + (r.hr6 ?? '—') + ' / ' + (r.hr24 ?? '—') + ' mm</td></tr>' +
+          '<tr><td>蒸發率</td><td>' + r.evapMmPerH + ' mm/h</td></tr>' +
+          '<tr><td>乾燥</td><td>' + (r.dryInHours != null ? '約 ' + r.dryInHours + ' 小時' : (r.dryNote || '—')) + '</td></tr>' +
+          '</table><div style="margin-top:3px;color:#898781">' + r.area + '</div></div>',
+          { direction: 'top' }));
     }
   }
 
@@ -497,7 +517,7 @@
       '<span style="color:var(--ink-muted)">坡度換邊另貢獻 ' + (ag >= 0 ? '+' : '') + Math.round(ag) +
       ' s（途中振幅 ±' + Math.round(gradeSwing) + ' s，幾乎自相抵銷，未繪出）</span>　· 色帶（' +
       (S.dir === 'CW' ? '順時針 · ' : '逆時針 · ') +
-      ({ wind: '順逆風', exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
+      ({ wind: '順逆風', surface: '路面濕度', exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
   }
   function setProfCursor(i) {
     if (!S.pGeom || !S.pGeom.cur) return;
@@ -614,6 +634,22 @@
                 cv.barnesRmsDeg + '°（<b>改善 ' + cv.rmsImprovementPct + '%</b>，' +
                 cv.improvedStations + '/' + cv.n + ' 站變好）' : ''));
 
+    const sf = S.cond.surface;
+    $('surfHelp').innerHTML =
+      '<b>路面濕度怎麼算</b>　不是「上次下雨後幾小時」的經驗衰減，而是水膜的質量平衡：' +
+      '逐時積分過去 24 小時，<code>film += 降雨（趨近該雨強的平衡膜厚，其餘逕流）</code>、' +
+      '<code>film −= 蒸發</code>。<br>' +
+      '蒸發率用 <b>Penman 開水面公式</b>（輻射項＋空氣動力項），輸入為日射、氣溫、濕度、風速。' +
+      '文獻指出蒸發驅動強弱依序為日射 > 氣溫 > 水氣壓差 > 風速，與此公式的項次權重一致。<br>' +
+      '雨量來自 <b>CWA ' + sf.stationCount + ' 個雨量站</b>（空間密度高），' +
+      '乾燥條件來自 Open-Meteo 的逐時日射/風/濕度（測站沒有這些）。<br>' +
+      '夜間淨輻射為負時公式會給出<b>負蒸發率＝結露</b> —— 清晨路面可能沒下雨卻是濕的，模型保留這個行為。<br>' +
+      '門檻：水膜 ≥' + sf.thresholds.wetFilmMm + ' mm 判為「濕」（會噴水）、≥' +
+      sf.thresholds.dampFilmMm + ' mm 判為「潮濕」。<br><br>' +
+      '<b>紫外線</b>　UV 指數 ×0.025 W/m² 為紅斑加權輻照度，沿騎乘時間積分得累積劑量。' +
+      '1 MED（最小紅斑劑量，第 III 型膚質）取 ' + (S.cond.uv.medJm2 || 350) + ' J/m²。' +
+      '山區有樹蔭，實際曝曬低於此估計。';
+
     $('arrowHelp').innerHTML =
       '箭頭畫在 Open-Meteo 的 <b>' + w.sampleCount + ' 個取樣點</b>上（沿路線等距），' +
       '指向風「吹往」的方向，長度隨風速。<br>' +
@@ -624,8 +660,94 @@
       '滑鼠移到箭頭可看該點原始值。';
   }
 
+  // ---------- 路面與紫外線 ----------
+  function renderSurfaceUv() {
+    const sf = S.cond.surface, uv = S.cond.uv;
+    const wetTotal = (sf.wetKm || 0) + (sf.dampKm || 0);
+    const sCls = sf.wetKm > 1 ? 'bad' : wetTotal > 1 ? 'alert' : '';
+    const uvCls = uv.maxUv >= 8 ? 'bad' : uv.maxUv >= 6 ? 'alert' : '';
+
+    const surfText = sf.wetKm > 0.5
+      ? '濕 ' + sf.wetKm.toFixed(1) + ' km'
+      : sf.dampKm > 0.5 ? '潮濕 ' + sf.dampKm.toFixed(1) + ' km' : '全線乾燥';
+    const uvText = uv.isNight ? '夜間' : uv.maxUv.toFixed(1);
+
+    $('surfCard').innerHTML =
+      '<div class="sc-row">' +
+      '<div class="sc ' + sCls + '"><div class="k">路面</div><div class="v">' + surfText + '</div>' +
+      '<div class="s">降雨中 ' + sf.rainingStations + '/' + sf.stationCount + ' 站 · 最大水膜 ' +
+      sf.maxFilmMm.toFixed(2) + ' mm</div></div>' +
+      '<div class="sc ' + uvCls + '"><div class="k">紫外線（騎乘期間最大）</div><div class="v">' + uvText + '</div>' +
+      '<div class="s">' + (uv.isNight
+        ? (uv.nextPeak ? '下個高峰 ' + uv.nextPeak.time.slice(5, 16).replace('T', ' ') + ' UV ' + uv.nextPeak.uvIndex : '—')
+        : uv.band + ' · 累積 ' + uv.doseMed + ' MED · ' +
+          (uv.burnMinutesAtPeak ? '最強時 ' + uv.burnMinutesAtPeak + ' 分曬傷' : '')) +
+      '</div></div></div>' +
+      '<div class="s" style="font-size:11.5px;color:var(--ink-2)">' +
+      '目前蒸發率 <b>' + sf.evapNowMmPerH + '</b> mm/h' +
+      (sf.evapNowMmPerH < 0 ? '（<b style="color:#d03b3b">結露中</b>，路面不會變乾）' : '') +
+      '</div>';
+
+    renderUvChart();
+  }
+
+  /** 騎乘期間的 UV 逐時變化（夜間則顯示到下一個高峰） */
+  function renderUvChart() {
+    const svg = $('uvChart');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const uv = S.cond.uv;
+    // 夜間時騎乘期間全是 0，改畫未來 24 小時展望
+    const night = uv.isNight && (uv.outlookHours || []).length > 2;
+    const hrs = night ? uv.outlookHours : (uv.hours || []);
+    if (!hrs.length) return;
+
+    const W = 300, H = 78, P = { t: 6, r: 8, b: 16, l: 20 };
+    const iw = W - P.l - P.r, ih = H - P.t - P.b;
+    const maxU = Math.max(3, ...hrs.map((h) => h.uvIndex));
+    const x = (i) => P.l + (hrs.length <= 1 ? iw / 2 : (i / (hrs.length - 1)) * iw);
+    const y = (u) => P.t + ih - (u / maxU) * ih;
+
+    // WHO 分級背景帶
+    for (const [lo, hi, col] of [[0, 3, '#e8f5e8'], [3, 6, '#fff6e5'], [6, 8, '#ffe9dd'], [8, 20, '#fde6e6']]) {
+      if (lo >= maxU) continue;
+      const y0 = y(Math.min(hi, maxU)), y1 = y(lo);
+      svg.appendChild(mk('rect', { x: P.l, y: y0, width: iw, height: Math.max(0, y1 - y0), fill: col }));
+    }
+    for (const u of [3, 6, 8]) {
+      if (u > maxU) continue;
+      svg.appendChild(mk('line', { x1: P.l, x2: P.l + iw, y1: y(u), y2: y(u),
+                                   stroke: '#c3c2b7', 'stroke-width': .8, 'stroke-dasharray': '3 2' }));
+      svg.appendChild(mk('text', { class: 'ax', x: P.l - 4, y: y(u) + 3, 'text-anchor': 'end' })).textContent = u;
+    }
+    const d = 'M' + hrs.map((h, i) => x(i).toFixed(1) + ',' + y(h.uvIndex).toFixed(1)).join('L');
+    svg.appendChild(mk('path', { d: d + 'L' + x(hrs.length - 1) + ',' + y(0) + 'L' + x(0) + ',' + y(0) + 'Z',
+                                 fill: '#eda100', 'fill-opacity': .22 }));
+    svg.appendChild(mk('path', { d, fill: 'none', stroke: '#eda100', 'stroke-width': 2.2, 'stroke-linejoin': 'round' }));
+    for (const i of [0, hrs.length - 1]) {
+      if (hrs.length < 2 && i === 1) continue;
+      const t = mk('text', { class: 'ax', x: x(i), y: H - 4, 'text-anchor': i === 0 ? 'start' : 'end' });
+      t.textContent = hrs[i].time.slice(11, 16);
+      svg.appendChild(t);
+    }
+    // 標出高峰
+    let pk = 0;
+    hrs.forEach((h, i) => { if (h.uvIndex > hrs[pk].uvIndex) pk = i; });
+    if (hrs[pk].uvIndex > 0.5) {
+      svg.appendChild(mk('circle', { cx: x(pk), cy: y(hrs[pk].uvIndex), r: 3,
+                                     fill: '#fff', stroke: '#eda100', 'stroke-width': 2 }));
+      const pl = mk('text', { x: x(pk), y: y(hrs[pk].uvIndex) - 6, 'text-anchor': 'middle',
+                              'font-size': 10, 'font-weight': 650 });
+      pl.textContent = hrs[pk].uvIndex.toFixed(1) + ' @ ' + hrs[pk].time.slice(11, 16);
+      svg.appendChild(pl);
+    }
+    // 標題放左上：高峰通常在中後段，放右上會被高峰標籤壓到
+    const lbl = mk('text', { x: P.l + 2, y: P.t + 9, 'text-anchor': 'start', 'font-size': 10, fill: '#898781' });
+    lbl.textContent = night ? '未來 24 小時 UV 展望' : '騎乘期間 UV';
+    svg.appendChild(lbl);
+  }
+
   function renderAll() {
-    renderVerdict(); renderLegend(); renderCompass(); renderHelp();
+    renderVerdict(); renderLegend(); renderCompass(); renderHelp(); renderSurfaceUv();
     renderMap(); renderProfile(); renderTable(); renderMeta();
   }
 

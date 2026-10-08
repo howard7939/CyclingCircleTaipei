@@ -18,6 +18,7 @@ import {
   toUV, toSpeedDir, loadParams, exposureDisplacement, solveSpeedMs, USER_TUNABLE,
 } from './wind-model.mjs';
 import { buildWindField } from './wind-field.mjs';
+import { stationWetness, surfaceAlongRoute, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -137,6 +138,26 @@ async function getConditions({ full = false, overrides = null } = {}) {
   const calmField = segs.map(() => ({ u: 0, v: 0, speedMs: 0, fromDeg: 0, gustMs: 0 }));
   const calm = analyzeDirections(segs, calmField, M.gpxOrientation, params);
 
+  // ---------- 路面濕度：水膜質量平衡（Penman 蒸發） ----------
+  const nowIso = new Date().toISOString();
+  const hourly = om.points[0]?.hourly || [];
+  const rainSt = rain.stations.filter((s) => s.hr24 != null || s.hr1 != null);
+  const wetStations = rainSt.map((st) => stationWetness(st, hourly, nowIso));
+  const surf = surfaceAlongRoute(segs, wetStations);
+
+  const surfLevels = { wet: 0, damp: 0, dry: 0 };
+  let maxFilm = 0, wetKm = 0, dampKm = 0;
+  surf.forEach((x, i) => {
+    surfLevels[x.level] += segs[i].len / 1000;
+    if (x.filmMm > maxFilm) maxFilm = x.filmMm;
+    if (x.level === 'wet') wetKm += segs[i].len / 1000;
+    if (x.level === 'damp') dampKm += segs[i].len / 1000;
+  });
+
+  // ---------- 紫外線：騎乘期間的劑量 ----------
+  const rideH = analysis.directions[analysis.recommend || 'CCW'].timeS / 3600;
+  const uvNow = uvAnalysis(hourly, nowIso, rideH);
+
   const rs = rain.stations.filter((s) => s.hr1 != null);
   const out = {
     generatedAt: new Date().toISOString(),
@@ -209,11 +230,28 @@ async function getConditions({ full = false, overrides = null } = {}) {
                        area: (s.county || '') + (s.town || '') })),
     },
     uv: {
-      nowRange: [Math.min(...om.points.map((p) => p.current.uvIndex ?? 0)),
-                 Math.max(...om.points.map((p) => p.current.uvIndex ?? 0))],
+      ...uvNow,
       isDay: om.points[0]?.current?.isDay ?? null,
       cwaTaipeiDailyMax: uv.stations?.find((s) => s.id === '466920')?.uvIndex ?? null,
       cwaNote: uv.note ?? null,
+      rideHours: +rideH.toFixed(2),
+    },
+    surface: {
+      wetKm: +wetKm.toFixed(1), dampKm: +dampKm.toFixed(1),
+      dryKm: +(surfLevels.dry).toFixed(1),
+      maxFilmMm: +maxFilm.toFixed(3),
+      stationCount: wetStations.length,
+      rainingStations: wetStations.filter((w) => w.rainingNow).length,
+      wettest: wetStations.filter((w) => w.filmMm > 0.005)
+        .sort((a, b) => b.filmMm - a.filmMm).slice(0, 12)
+        .map((w) => ({ name: w.name, lat: w.lat, lon: w.lon, area: w.area,
+                       filmMm: w.filmMm, level: w.level, rainingNow: w.rainingNow,
+                       hr1: w.hr1, hr6: w.hr6, hr24: w.hr24,
+                       dryInHours: w.dryInHours, dryNote: w.dryNote, evapMmPerH: w.evapMmPerH })),
+      evapNowMmPerH: wetStations.length ? wetStations[0].evapMmPerH : null,
+      thresholds: { wetFilmMm: SURFACE_DEFAULTS.wetFilmMm, dampFilmMm: SURFACE_DEFAULTS.dampFilmMm },
+      note: '水膜質量平衡：film += 雨量，film −= Penman 蒸發（逐時積分過去 24 小時）。' +
+            '雨量來自 CWA 雨量站（空間密度高），乾燥條件來自 Open-Meteo 逐時日射/風/濕度。',
     },
     params,
     sources: {
@@ -233,6 +271,7 @@ async function getConditions({ full = false, overrides = null } = {}) {
       cw: analysis.directions.CW.perSeg[i], ccw: analysis.directions.CCW.perSeg[i],
       cwCalmS: calm.directions.CW.perSeg[i].timeS,
       ccwCalmS: calm.directions.CCW.perSeg[i].timeS,
+      surf: surf[i],
     }));
     out.stations = low.map((s) => ({ id: s.id, name: s.name, lat: s.lat, lon: s.lon,
       altM: s.altM, windMs: s.windMs, windFromDeg: s.windFromDeg, tempC: s.tempC }));
