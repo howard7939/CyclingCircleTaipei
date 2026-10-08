@@ -345,6 +345,11 @@ async function getConditions({ full = false, overrides = null } = {}) {
       shelterRatio: stScalar ? +(omVec.speedMs / stScalar).toFixed(2) : null,
       fieldSpeedRangeMs: [+Math.min(...field.map((f) => f.speedMs)).toFixed(2),
                           +Math.max(...field.map((f) => f.speedMs)).toFixed(2)],
+      // 陣風：報告值是尖峰，σ ≈ (尖峰 − 平均)/3（風工程的尖峰因子）
+      gustMs: +(om.points.reduce((a, p) => a + (p.current.gustMs ?? 0), 0) / om.points.length).toFixed(2),
+      gustSigmaMs: +(field.reduce((a, f) => a + (f.gustSigmaMs ?? 0), 0) / field.length).toFixed(2),
+      gustFactor: +((om.points.reduce((a, p) => a + (p.current.gustMs ?? 0), 0) / om.points.length) /
+                    Math.max(0.1, omVec.speedMs)).toFixed(2),
       obsTime: obs.stations[0]?.obsTime ?? null,
       modelTime: om.points[0]?.current?.time ?? null,
       // 風場的實際來源：沿路線等距取 SAMPLE_N 個點查 Open-Meteo，
@@ -388,6 +393,13 @@ async function getConditions({ full = false, overrides = null } = {}) {
       noiseFloorSec: st.noiseFloorSec,                                 // 零風平路，應為 0
       uniformWindSec: st.uniformWindSec,
       contributionSec: analysis.contributionSec,
+      // 陣風讓兩個方向都變慢，但逆風段慢得更多：定功率下逆風速度低、
+      // 在陣風裡待得久，而 1/v 又是凸函數。實測同樣 σ=2 m/s，
+      // 逆風 +4 的時間損失是順風 −4 的 2.68 倍（+3.0 s/km vs +1.1 s/km）。
+      gustPenaltySec: {
+        CW: analysis.directions.CW.gustPenaltyS,
+        CCW: analysis.directions.CCW.gustPenaltyS,
+      },
       exposureDisplacement: D,
       byDirection: Object.fromEntries(Object.entries(analysis.directions).map(([k, v]) => [k, {
         timeMin: v.timeMin, timeS: v.timeS, avgSpeedKmh: v.avgSpeedKmh,

@@ -166,7 +166,11 @@
       '開闊地風 <b>' + w.openTerrain.speedMs + '</b> m/s 從 <b>' + w.openTerrain.fromDeg + '°</b>' +
       ' · 目標 <b>' + d.targetPowerW + '</b> W' +
       '<br>純風 ' + (d.windDeltaSec >= 0 ? '+' : '') + Math.round(d.windDeltaSec) + ' s' +
-      ' · 與天氣無關的常數項 ' + (d.calmDeltaSec >= 0 ? '+' : '') + Math.round(d.calmDeltaSec) + ' s';
+      ' · 與天氣無關的常數項 ' + (d.calmDeltaSec >= 0 ? '+' : '') + Math.round(d.calmDeltaSec) + ' s' +
+      (d.gustPenaltySec
+        ? '<br>陣風讓兩個方向都變慢：順 ' + Math.round(d.gustPenaltySec.CW) +
+          ' s、逆 ' + Math.round(d.gustPenaltySec.CCW) + ' s（已含在上面的數字裡）'
+        : '');
 
     $('vCW').textContent = cw.timeMin.toFixed(1) + ' min';
     $('vCCW').textContent = ccw.timeMin.toFixed(1) + ' min';
@@ -307,6 +311,9 @@
     const st = S.cond.wind.stationsVector;
     kv.innerHTML =
       '<dt>開闊地風</dt><dd>' + w.speedMs + ' m/s @ ' + w.fromDeg + '°</dd>' +
+      '<dt>陣風</dt><dd>' + (S.cond.wind.gustMs ?? '—') + ' m/s（×' +
+        (S.cond.wind.gustFactor ?? '—') + '）</dd>' +
+      '<dt>起伏 σ</dt><dd>' + (S.cond.wind.gustSigmaMs ?? '—') + ' m/s</dd>' +
       '<dt>測站向量平均</dt><dd>' + (st ? st.speedMs + ' m/s @ ' + st.fromDeg + '°' : '—') + '</dd>' +
       '<dt>兩者風向差</dt><dd>' + S.cond.wind.directionAgreeDeg + '°</dd>' +
       '<dt>遮蔽比</dt><dd>' + S.cond.wind.shelterRatio + '×</dd>' +
@@ -718,7 +725,15 @@
       '時間差正比於 W·D。<br>' +
       '<b>臨界風向 ' + D.criticalFromDeg.map((x) => x.toFixed(0) + '°').join(' / ') + '</b>　' +
       'W 與 D 垂直之處，兩個方向等價。風從 ' + D.ccwCenterFromDeg.toFixed(0) + '° 來時最該逆時針，' +
-      '從 ' + D.cwCenterFromDeg.toFixed(0) + '° 來時最該順時針。';
+      '從 ' + D.cwCenterFromDeg.toFixed(0) + '° 來時最該順時針。<br><br>' +
+      '<b>陣風為什麼逆風時特別痛苦</b>　陣風本身的效應是對稱的 —— 阻力正比於 ' +
+      '(v+h)²，風速起伏 σ 讓平均阻力多出 ½ρCdA·σ²，與順逆風無關。' +
+      '真正的不對稱來自<b>暴露時間</b>：定功率下逆風速度低（例如 18 vs 34 km/h），' +
+      '每公里要花將近兩倍的時間待在陣風裡，而 1/v 又是凸函數，兩者疊加。<br>' +
+      '因此模型不是加一個 σ² 修正項，而是對陣風分布<b>積分通過時間</b>' +
+      '（高斯-厄米特 5 點）。實測同樣 σ=2 m/s，逆風 +4 的損失是順風 −4 的 2.68 倍；' +
+      '目前這組資料（±1.9 m/s）實測逐段比值 1.88 倍。<br>' +
+      'σ 由尖峰陣風推得：報告的陣風是尖峰而非標準差，σ ≈ (陣風 − 平均) / 3。';
 
     const an = w.analysis || {};
     const cv = an.crossValidation;

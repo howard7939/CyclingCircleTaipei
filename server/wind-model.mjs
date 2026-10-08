@@ -49,6 +49,12 @@ export const DEFAULT_PARAMS = {
   // 下坡煞車上限。定功率模型在 −6% 會解出 54 km/h，但實測最快區塊是
   // 46 km/h —— 差額是煞車與過彎。兩個方向套用同一上限，比較仍公平。
   maxSpeedKmh: 48,
+  // 陣風。報告的陣風是「尖峰」而非標準差，兩者以尖峰因子相連：
+  //   peak ≈ mean + g·σ，10 分鐘期間取 3 秒陣風時 g ≈ 3
+  // 故 σ ≈ (陣風 − 平均) / 3。設 0 則完全忽略陣風。
+  gustPeakFactor: 3.0,
+  // 陣風分布的積分點數（高斯-厄米特近似）。5 點已足夠，再多只是變慢。
+  gustQuadPoints: 5,
   // 側風 yaw 修正：阻力沿行進方向的分量為 ½ρ·CdA·|v_app|·(v+h)，
   // 側風會增大 |v_app| 因而增加阻力，即使它本身垂直於行進方向。
   // 關閉時退化為純縱向模型 ½ρ·CdA·(v+h)²，此時「均勻風場繞閉環零方向
@@ -333,6 +339,38 @@ export function solveSpeedMs(powerW, gradePct, headwindMs, crossMs, params = DEF
 }
 
 /**
+ * 陣風下的路段通過時間。
+ *
+ * 不能只在阻力上加一個 σ² 修正項：那只抓到「阻力變大」，抓不到真正的主因
+ * —— 定功率下陣風讓你變慢，於是你在陣風裡待得更久，而 1/v 是凸函數，
+ * 兩個效應疊加。實測同樣 σ=2 m/s 的陣風，逆風 +4 m/s 的時間損失是順風 −4
+ * 的 2.68 倍（逆風 +3.0 s/km vs 順風 +1.1 s/km）—— 這正是「逆風遇到陣風
+ * 特別痛苦」的來源，而純 σ² 修正會把兩者算成一樣。
+ *
+ * 作法：對陣風分布積分通過時間 ⟨L/v(h̄+σz)⟩，z 取標準常態的高斯-厄米特節點。
+ */
+const GQ = {
+  5: { z: [-2.0, -0.95, 0, 0.95, 2.0], w: [0.028, 0.247, 0.45, 0.247, 0.028] },
+  3: { z: [-1.6, 0, 1.6], w: [0.11, 0.78, 0.11] },
+};
+
+export function segmentTimeS(powerW, gradePct, h, c, sigma, lenM, params) {
+  if (!(sigma > 0.05)) {
+    const v = solveSpeedMs(powerW, gradePct, h, c, params);
+    return { timeS: lenM / v, speedMs: v, gustPenaltyS: 0 };
+  }
+  const q = GQ[params.gustQuadPoints] || GQ[5];
+  let t = 0, sw = 0, vSum = 0;
+  for (let i = 0; i < q.z.length; i++) {
+    const v = solveSpeedMs(powerW, gradePct, h + sigma * q.z[i], c, params);
+    t += q.w[i] * (lenM / v); sw += q.w[i]; vSum += q.w[i] * v;
+  }
+  const timeS = t / sw;
+  const steady = lenM / solveSpeedMs(powerW, gradePct, h, c, params);
+  return { timeS, speedMs: lenM / timeS, gustPenaltyS: timeS - steady };
+}
+
+/**
  * 方向分析：在固定目標功率下，比較順時針與逆時針。
  *
  * 定功率時總能量 = P × T，所以「時間」就是最自然也最可解讀的比較量綱，
@@ -353,7 +391,7 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
 
   const result = {};
   for (const { key, sign } of dirs) {
-    let timeS = 0, distM = 0, aeroJ = 0, cappedM = 0, energyJ = 0;
+    let timeS = 0, distM = 0, aeroJ = 0, cappedM = 0, energyJ = 0, gustS = 0;
     const byExposure = {};
     const perSeg = [];
 
@@ -372,13 +410,17 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
       const c = Math.hypot(cx, cy);
 
       const grade = sign > 0 ? s.gradePct : -s.gradePct;
-      const v = solveSpeedMs(P, grade, h, c, params);
+      // 陣風的起伏同樣受曝露度折減（市區遮蔽也擋陣風）
+      const sigma = (w.gustSigmaMs ?? 0) * k;
+      const st = segmentTimeS(P, grade, h, c, sigma, s.len, params);
+      const v = st.speedMs;
       const atCap = v >= params.maxSpeedKmh / 3.6 - 1e-9;
 
       const along = v + h;
       const vApp = params.yawCorrection ? Math.hypot(along, c) : Math.abs(along);
       const dAero = half * vApp * along * s.len;
-      const dt = s.len / v;
+      const dt = st.timeS;
+      gustS += st.gustPenaltyS;
 
       // 實際需要的功率。下坡觸及煞車上限時騎士是在煞車，不是輸出 P；
       // 重力大於阻力時需要的功率甚至為負。照 P×t 計能量會高估做功。
@@ -399,6 +441,7 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
         i, headwindMs: +h.toFixed(3), crossMs: +c.toFixed(3),
         speedKmh: +(v * 3.6).toFixed(1), appMs: +vApp.toFixed(2),
         timeS: +dt.toFixed(2), atCap,
+        gustSigmaMs: +sigma.toFixed(2), gustPenaltyS: +st.gustPenaltyS.toFixed(2),
       });
     }
 
@@ -410,6 +453,7 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
       aeroWorkKJ: +(aeroJ / 1000).toFixed(1),
       avgSpeedKmh: +(distM / timeS * 3.6).toFixed(2),
       brakingCapKm: +(cappedM / 1000).toFixed(2),
+      gustPenaltyS: +gustS.toFixed(1),
       byExposure: Object.fromEntries(Object.entries(byExposure).map(([k2, v2]) => [k2, {
         km: +v2.km.toFixed(2),
         timeMin: +(v2.timeS / 60).toFixed(2),

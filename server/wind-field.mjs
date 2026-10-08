@@ -87,6 +87,22 @@ export function makeBackground(omPoints, { power = 2, minKm = 0.3 } = {}) {
   };
 }
 
+/**
+ * 由「尖峰陣風」推出風速起伏的標準差。
+ *
+ * 報告的陣風是尖峰值而非標準差，兩者以尖峰因子相連：peak ≈ mean + g·σ。
+ * 10 分鐘期間取 3 秒陣風時 g ≈ 3（風工程的慣用值）。
+ *
+ * 注意 CWA 測站的 PeakGustSpeed 取樣期間較長，算出的陣風因子偏高
+ * （實測中位 2.79，而開闊地 3 秒陣風的典型值約 1.5-1.7）。因此這裡用
+ * 模式的陣風，與模式的平均風同源、期間一致，較不會高估。
+ */
+const GUST_PEAK_FACTOR = 3.0;
+function gustSigma(gustMs, meanMs) {
+  if (!Number.isFinite(gustMs) || !Number.isFinite(meanMs)) return 0;
+  return Math.max(0, (gustMs - meanMs) / GUST_PEAK_FACTOR);
+}
+
 /** 依測站散佈密度推出 Barnes 的起始尺度 κ₀ = 5.052·(2Δn/π)² */
 export function barnesKappa(stations) {
   if (stations.length < 3) return { kappaKm2: 100, spacingKm: 10, areaKm2: null };
@@ -206,7 +222,8 @@ export function buildWindField(segments, omPoints, stations, cfgOverride = null)
   const modelOnly = (reason, extra = {}) => {
     const field = segments.map((s) => {
       const b = background(s.lat, s.lon);
-      return { ...b, ...toSpeedDir(b.u, b.v), dirShiftDeg: 0 };
+      const sd = toSpeedDir(b.u, b.v);
+      return { ...b, ...sd, dirShiftDeg: 0, gustSigmaMs: gustSigma(b.gustMs, sd.speedMs) };
     });
     return { field, method: 'model-only', reason, ...extra };
   };
@@ -247,7 +264,8 @@ export function buildWindField(segments, omPoints, stations, cfgOverride = null)
     const shift = angDiff(bg.fromDeg, an.fromDeg);
     maxShift = Math.max(maxShift, shift); sumShift += shift;
     return { u, v, gustMs: b.gustMs, speedMs: an.speedMs, fromDeg: an.fromDeg,
-             dirShiftDeg: +shift.toFixed(1) };
+             dirShiftDeg: +shift.toFixed(1),
+             gustSigmaMs: gustSigma(b.gustMs, an.speedMs) };
   });
 
   return {

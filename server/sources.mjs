@@ -321,7 +321,7 @@ export async function openMeteo(points, { hours = 24 } = {}) {
                'relative_humidity_2m,uv_index,is_day,shortwave_radiation',
       // 過去 24 小時的逐時資料是路面乾燥模型的輸入：要把蒸發量積分回來，
       // 就需要當時的日射、風、濕度、氣溫，而不是只有現在的值。
-      hourly: 'wind_speed_10m,wind_direction_10m,precipitation,precipitation_probability,' +
+      hourly: 'wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,precipitation_probability,' +
               'uv_index,uv_index_clear_sky,temperature_2m,relative_humidity_2m,shortwave_radiation,is_day',
       wind_speed_unit: 'ms',
       timezone: 'Asia/Taipei',
@@ -356,6 +356,7 @@ export async function openMeteo(points, { hours = 24 } = {}) {
           time: t,
           windMs: o.hourly.wind_speed_10m?.[k] ?? null,
           windFromDeg: o.hourly.wind_direction_10m?.[k] ?? null,
+          gustMs: o.hourly.wind_gusts_10m?.[k] ?? null,
           precipMm: o.hourly.precipitation?.[k] ?? null,
           precipProb: o.hourly.precipitation_probability?.[k] ?? null,
           uvIndex: o.hourly.uv_index?.[k] ?? null,
