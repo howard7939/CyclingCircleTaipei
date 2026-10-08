@@ -182,6 +182,7 @@
       <div class="modes" id="modes">
         <button data-mode="wind" aria-pressed="true">順逆風</button>
         <button data-mode="surface" aria-pressed="false">路面濕度</button>
+        <button data-mode="radar" aria-pressed="false">雷達回波</button>
         <button data-mode="exposure" aria-pressed="false">曝露度</button>
         <button data-mode="grade" aria-pressed="false">坡度</button>
       </div>
@@ -232,6 +233,7 @@
     <div class="sec">
       <h2>路面與紫外線</h2>
       <div id="surfCard"></div>
+      <div id="radarCard"></div>
       <svg id="uvChart" viewBox="0 0 300 78" style="width:100%;display:block;margin-top:10px"></svg>
       <div class="note" id="surfHelp"></div>
     </div>
@@ -252,6 +254,8 @@
         <input type="checkbox" id="tStations"> 氣象測站</label>
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;margin-top:6px">
         <input type="checkbox" id="tRain" checked> 雨量站（圈大小＝水膜厚度）</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;margin-top:6px">
+        <input type="checkbox" id="tEcho" checked> 雷達回波格點</label>
     </div>
 
     <div class="sec">

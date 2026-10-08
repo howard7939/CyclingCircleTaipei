@@ -19,6 +19,7 @@ import {
 } from './wind-model.mjs';
 import { buildWindField } from './wind-field.mjs';
 import { stationWetness, surfaceAlongRoute, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
+import { fetchRadar, radarAlongRoute, echoCells, dbzToRainMmPerH, RADAR } from './radar.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -98,11 +99,13 @@ async function getConditions({ full = false, overrides = null } = {}) {
     return { name: 'km' + (s.s0 / 1000).toFixed(0), lat: s.lat, lon: s.lon };
   });
 
-  const [obs, rain, uv, om] = await Promise.all([
+  const [obs, rain, uv, om, radarFrame] = await Promise.all([
     cwaStations(bbox).catch((e) => ({ error: e.message, stations: [] })),
     cwaRain(bbox).catch((e) => ({ error: e.message, stations: [] })),
     cwaUv().catch((e) => ({ error: e.message, stations: [] })),
     openMeteo(samplePts),
+    // 雷達失敗不應該讓整頁掛掉 —— 其餘分析不依賴它
+    fetchRadar(M.bbox).catch((e) => ({ error: e.message })),
   ]);
 
   // 測站風的向量平均（只取低地站；高山站風速與盆地不可比）
@@ -144,6 +147,48 @@ async function getConditions({ full = false, overrides = null } = {}) {
   const rainSt = rain.stations.filter((s) => s.hr24 != null || s.hr1 != null);
   const wetStations = rainSt.map((st) => stationWetness(st, hourly, nowIso));
   const surf = surfaceAlongRoute(segs, wetStations);
+
+  // 雷達：補足雨量站的空間解析度（1.3 km vs 站距 5-10 km）。
+  // 只修正「現在」—— 過去 24 小時的歷史仍由雨量站提供，雷達沒有歷史。
+  let radar = null;
+  if (radarFrame && !radarFrame.error) {
+    const ra = radarAlongRoute(segs, radarFrame);
+    radar = {
+      available: true,
+      obsTime: ra.obsTime,
+      ageMin: Math.round((Date.now() - new Date(ra.obsTime).getTime()) / 60000),
+      maxDbz: ra.maxDbz, maxRainMmPerH: ra.maxRainMmPerH,
+      echoKm: ra.echoKm, outOfRangeKm: ra.outOfRangeKm,
+      meanRainOnEcho: ra.meanRainOnEcho, anyRain: ra.anyRain,
+      gridResDeg: radarFrame.res,
+      gridResKm: +(radarFrame.res * 111.32).toFixed(2),
+      cellsNearRoute: echoCells(radarFrame, M.bbox),
+      subgridCells: radarFrame.nx * radarFrame.ny,
+      stats: radarFrame.stats,
+      timing: radarFrame.timing,
+      cache: radarFrame.cache,
+      note: '雷達合成回波 O-A0059-001，數值 dBZ 網格（非回波圖影像）。' +
+            'Marshall-Palmer Z=200R^1.6 換算雨強。雷達會漏掉低層地形雨，' +
+            '且 dBZ 與地面雨量有 2 倍以上不確定度，故與雨量站互補而非取代。',
+    };
+    // 正在下雨的路段：水膜至少要達到該雨強的平衡厚度
+    for (let i = 0; i < segs.length; i++) {
+      const R = ra.perSegment[i].rainMmPerH;
+      surf[i].radarDbz = ra.perSegment[i].dbz;
+      surf[i].radarRainMmPerH = R;
+      if (R > 0) {
+        const eq = Math.min(SURFACE_DEFAULTS.maxFilmMm, SURFACE_DEFAULTS.filmPerSqrtRain * Math.sqrt(R));
+        if (eq > surf[i].filmMm) {
+          surf[i].filmMm = +eq.toFixed(3);
+          surf[i].level = eq >= SURFACE_DEFAULTS.wetFilmMm ? 'wet'
+                        : eq >= SURFACE_DEFAULTS.dampFilmMm ? 'damp' : 'dry';
+          surf[i].fromRadar = true;
+        }
+      }
+    }
+  } else {
+    radar = { available: false, error: radarFrame?.error ?? '未取得雷達資料' };
+  }
 
   const surfLevels = { wet: 0, damp: 0, dry: 0 };
   let maxFilm = 0, wetKm = 0, dampKm = 0;
@@ -236,6 +281,7 @@ async function getConditions({ full = false, overrides = null } = {}) {
       cwaNote: uv.note ?? null,
       rideHours: +rideH.toFixed(2),
     },
+    radar,
     surface: {
       wetKm: +wetKm.toFixed(1), dampKm: +dampKm.toFixed(1),
       dryKm: +(surfLevels.dry).toFixed(1),

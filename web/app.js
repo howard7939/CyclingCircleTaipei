@@ -26,6 +26,16 @@
     { max: 0.30,     color: '#5598e7', label: '濕 0.15–0.30' },
     { max: Infinity, color: '#184f95', label: '很濕 > 0.30 mm' },
   ];
+  // 雷達回波是量值 -> 單一藍色調序列色階。不用傳統雷達的彩虹配色：
+  // 彩虹色階的明度非單調，讀者無法由顏色判斷大小，且對色覺障礙者不可讀。
+  const RADAR_BINS = [
+    { max: 15,       color: '#cde2fb', label: '5–15 dBZ（毛毛雨）' },
+    { max: 25,       color: '#9ec5f4', label: '15–25（小雨）' },
+    { max: 35,       color: '#5598e7', label: '25–35（中雨）' },
+    { max: 45,       color: '#256abf', label: '35–45（大雨）' },
+    { max: Infinity, color: '#0d366b', label: '> 45 dBZ（豪雨）' },
+  ];
+  const NO_ECHO_COLOR = '#e1e0d9';
   const GRADE_BINS = [
     { max: -6,       color: '#184f95', label: '≤ −6%' },
     { max: -3,       color: '#2a78d6', label: '−6 ~ −3%' },
@@ -103,6 +113,10 @@
     if (S.color === 'exposure') return EXP[s.exposure].color;
     if (S.color === 'grade') return binOf(GRADE_BINS, s.gradePct).color;
     if (S.color === 'surface') return binOf(SURF_BINS, c.surf ? c.surf.filmMm : 0).color;
+    if (S.color === 'radar') {
+      const d = c.surf ? c.surf.radarDbz : null;
+      return d == null ? NO_ECHO_COLOR : binOf(RADAR_BINS, d).color;
+    }
     return binOf(WIND_BINS, c[dirKey()].headwindMs).color;
   }
   const dirKey = () => (S.dir === 'CW' ? 'cw' : 'ccw');
@@ -155,6 +169,22 @@
       for (const [k, e] of Object.entries(EXP)) {
         const km = segs.filter((s) => s.exposure === k).reduce((a, s) => a + s.len / 1000, 0);
         add(e.color, e.name, km.toFixed(1) + ' km');
+      }
+      return;
+    }
+    if (S.color === 'radar') {
+      const noKm = segs.filter((s, i) => (S.cond.segments[i].surf?.radarDbz) == null)
+        .reduce((a, s) => a + s.len / 1000, 0);
+      add(NO_ECHO_COLOR, '無回波', noKm.toFixed(1) + ' km');
+      let prev = -Infinity;
+      for (const b of RADAR_BINS) {
+        let km = 0;
+        for (let i = 0; i < segs.length; i++) {
+          const d = S.cond.segments[i].surf?.radarDbz;
+          if (d != null && d > prev && d <= b.max) km += segs[i].len / 1000;
+        }
+        prev = b.max;
+        if (km > 0.02) add(b.color, b.label, km.toFixed(1) + ' km');
       }
       return;
     }
@@ -278,6 +308,7 @@
       S.lines.push(pl); S.lineIdx.push(mid);
     }
 
+    S.echoLayer = L.layerGroup().addTo(S.map);
     S.arrowLayer = L.layerGroup().addTo(S.map);
     S.stationLayer = L.layerGroup();
     S.rainLayer = L.layerGroup().addTo(S.map);
@@ -336,6 +367,22 @@
                                            fillColor: '#52514e', fillOpacity: .9 })
           .bindTooltip(st.name + '　' + (st.windMs ?? '—') + ' m/s @ ' + (st.windFromDeg ?? '—') + '°' +
                        '　海拔 ' + (st.altM ?? '—') + ' m', { direction: 'top' }));
+    }
+
+    // 雷達回波格點：畫成實際的格點方塊（1.3 km），不做平滑 ——
+    // 平滑會讓人誤以為解析度比實際高
+    S.echoLayer.clearLayers();
+    const rad = S.cond.radar;
+    if (rad && rad.available) {
+      const h = (rad.gridResDeg || 0.0125) / 2;
+      for (const c of rad.cellsNearRoute) {
+        const kLon = h / Math.cos(c.lat * Math.PI / 180);
+        L.rectangle([[c.lat - h, c.lon - kLon], [c.lat + h, c.lon + kLon]], {
+          color: binOf(RADAR_BINS, c.dbz).color, weight: 0, fillOpacity: .42,
+        }).bindTooltip('雷達回波 ' + c.dbz + ' dBZ ≈ ' + c.mmPerH + ' mm/h<br>' +
+                       c.lat.toFixed(3) + 'N ' + c.lon.toFixed(3) + 'E',
+                       { direction: 'top' }).addTo(S.echoLayer);
+      }
     }
 
     S.rainLayer.clearLayers();
@@ -517,7 +564,7 @@
       '<span style="color:var(--ink-muted)">坡度換邊另貢獻 ' + (ag >= 0 ? '+' : '') + Math.round(ag) +
       ' s（途中振幅 ±' + Math.round(gradeSwing) + ' s，幾乎自相抵銷，未繪出）</span>　· 色帶（' +
       (S.dir === 'CW' ? '順時針 · ' : '逆時針 · ') +
-      ({ wind: '順逆風', surface: '路面濕度', exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
+      ({ wind: '順逆風', surface: '路面濕度', radar: '雷達回波', exposure: '曝露度', grade: '坡度' }[S.color]) + '）';
   }
   function setProfCursor(i) {
     if (!S.pGeom || !S.pGeom.cur) return;
@@ -646,6 +693,14 @@
       '夜間淨輻射為負時公式會給出<b>負蒸發率＝結露</b> —— 清晨路面可能沒下雨卻是濕的，模型保留這個行為。<br>' +
       '門檻：水膜 ≥' + sf.thresholds.wetFilmMm + ' mm 判為「濕」（會噴水）、≥' +
       sf.thresholds.dampFilmMm + ' mm 判為「潮濕」。<br><br>' +
+      '<b>雷達回波</b>　用 CWA 的<b>數值 dBZ 網格</b>（O-A0059-001）而非回波圖影像 —— ' +
+      '影像要建顏色對照表才能用、配色一改就壞，且顏色是分級量化的。' +
+      '網格解析度 0.0125°（約 1.3 km），比雨量站站距（5–10 km）細 4–6 倍，' +
+      '以 Marshall-Palmer（Z=200R^1.6）換算雨強。<br>' +
+      '雷達只修正「現在」—— 過去 24 小時的降雨歷史仍由雨量站提供，雷達沒有歷史資料。<br>' +
+      '<b>限制</b>：雷達會漏掉低層地形雨（實測大屯山、擎天崗回報 0.5 mm/h 但雷達無回波，' +
+      '波束在遠處已抬升掃不到山區低層）；dBZ 與地面雨量有 2 倍以上不確定度' +
+      '（雨幡、亮帶污染）。因此雷達與雨量站互補，不互相取代。<br><br>' +
       '<b>紫外線</b>　UV 指數 ×0.025 W/m² 為紅斑加權輻照度，沿騎乘時間積分得累積劑量。' +
       '1 MED（最小紅斑劑量，第 III 型膚質）取 ' + (S.cond.uv.medJm2 || 350) + ' J/m²。' +
       '山區有樹蔭，實際曝曬低於此估計。';
@@ -688,7 +743,32 @@
       (sf.evapNowMmPerH < 0 ? '（<b style="color:#d03b3b">結露中</b>，路面不會變乾）' : '') +
       '</div>';
 
+    renderRadarCard();
     renderUvChart();
+  }
+
+  function renderRadarCard() {
+    const r = S.cond.radar;
+    const host = $('radarCard');
+    if (!r || !r.available) {
+      host.innerHTML = '<div class="note" style="margin-top:8px">雷達回波：<b style="color:#d03b3b">不可用</b>　' +
+        ((r && r.error) ? r.error : '') + '</div>';
+      return;
+    }
+    const near = r.cellsNearRoute.length;
+    const strongest = near ? Math.max(...r.cellsNearRoute.map((c) => c.dbz)) : null;
+    const cls = r.anyRain ? 'bad' : near > 0 ? 'alert' : '';
+    host.innerHTML =
+      '<div class="sc-row" style="margin-top:8px"><div class="sc ' + cls + '">' +
+      '<div class="k">雷達回波（' + r.gridResKm + ' km 網格）</div>' +
+      '<div class="v">' + (r.anyRain
+        ? '路線上有雨 ' + r.echoKm.toFixed(1) + ' km'
+        : near > 0 ? '路線上無雨，周邊有' : '周邊無回波') + '</div>' +
+      '<div class="s">' +
+      (r.anyRain ? '最強 ' + r.maxDbz + ' dBZ ≈ ' + r.maxRainMmPerH + ' mm/h · ' : '') +
+      '周邊 ' + near + ' 格有回波' + (strongest != null ? '（最強 ' + strongest + ' dBZ）' : '') +
+      ' · 觀測於 ' + r.obsTime.slice(11, 16) + '（' + r.ageMin + ' 分前）</div>' +
+      '</div></div>';
   }
 
   /** 騎乘期間的 UV 逐時變化（夜間則顯示到下一個高峰） */
@@ -800,6 +880,7 @@
     $('tArrows').onchange = (e) => e.target.checked ? S.arrowLayer.addTo(S.map) : S.map.removeLayer(S.arrowLayer);
     $('tStations').onchange = (e) => e.target.checked ? S.stationLayer.addTo(S.map) : S.map.removeLayer(S.stationLayer);
     $('tRain').onchange = (e) => e.target.checked ? S.rainLayer.addTo(S.map) : S.map.removeLayer(S.rainLayer);
+    $('tEcho').onchange = (e) => e.target.checked ? S.echoLayer.addTo(S.map) : S.map.removeLayer(S.echoLayer);
 
     const svg = $('svg');
     svg.addEventListener('mousemove', (ev) => {
