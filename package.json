@@ -1,0 +1,12 @@
+{
+  "name": "cycling-circle-taipei",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "環騎臺北 騎乘資訊網站：風場/降雨/紫外線分析與順逆時針建議",
+  "scripts": {
+    "preprocess": "node scripts/preprocess-route.mjs",
+    "dev:server": "node --env-file=.env server/index.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
