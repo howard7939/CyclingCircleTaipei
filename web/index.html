@@ -171,21 +171,27 @@
     </div>
 
     <div class="sec">
+      <h2>路段（實地分類）</h2>
+      <div class="flags" id="sections"></div>
+    </div>
+
+    <div class="sec">
       <h2>圖層</h2>
       <div class="toggles">
-        <label><input type="checkbox" id="tWater" checked> OSM 水岸折線（分類依據）</label>
-        <label><input type="checkbox" id="tRamp" checked> 標示 8 段跨堤引道</label>
+        <label><input type="checkbox" id="tWp" checked> 路段分界點</label>
+        <label><input type="checkbox" id="tWater" checked> OSM 水岸折線</label>
+        <label><input type="checkbox" id="tDiff"> 自動推測與實地不符處</label>
         <label><input type="checkbox" id="tTable"> 表格檢視</label>
       </div>
     </div>
 
-    <div class="sec" id="secFlags">
-      <h2>需人眼確認的路段</h2>
-      <div class="flags" id="flags"></div>
+    <div class="sec" id="secDiff" hidden>
+      <h2 id="diffTitle">自動推測比對</h2>
+      <div class="flags" id="diffs"></div>
     </div>
 
     <div class="sec" id="secTable" hidden>
-      <h2>連續區段表</h2>
+      <h2>路段表</h2>
       <table class="tv" id="tbl"></table>
     </div>
   </div>
@@ -264,20 +270,26 @@
   if (segs.length < 100) fail('route.json 的 segments 只有 ' + segs.length + ' 段，資料異常。\n請重跑 npm run preprocess');
   if (segs.some((s) => s.exposure == null)) {
     const n = segs.filter((s) => s.exposure == null).length;
-    fail(n + ' 段的 exposure 是 null，曝露度分類未完成。\n請執行 node scripts/classify-exposure.mjs');
+    fail(n + ' 段的 exposure 是 null，路段分類未套用。\n請執行 node scripts/apply-sections.mjs');
+  }
+  if (!(route.meta.sections || []).length) {
+    fail('route.json 缺少 meta.sections（實地分類）。\n請執行 node scripts/apply-sections.mjs');
   }
 
   const M = route.meta;
   $('hdr').textContent = M.totalKm.toFixed(2) + ' km · ' + segs.length + ' 段 × ' +
     M.segmentLenM.toFixed(0) + ' m · 爬升 ' + M.elevGainM + ' m · GPX 記錄方向 ' +
-    (M.gpxOrientation === 'CCW' ? '逆時針' : '順時針');
+    (M.gpxOrientation === 'CCW' ? '逆時針' : '順時針') +
+    ' · 分類來源：' + (M.sectionSource || '未知');
 
   // ---------- 連續區段 ----------
+  // 以 sectionLabel 分段而非 exposure：山區的上坡與下坡同屬 mountain，但換方向
+  // 時兩者互換，速度差極大（14.4 vs 35.4 km/h），必須保持可分辨。
   const runs = [];
   for (const s of segs) {
     const last = runs[runs.length - 1];
-    if (last && last.exposure === s.exposure) { last.endKm = s.s1 / 1000; last.segs.push(s); }
-    else runs.push({ exposure: s.exposure, startKm: s.s0 / 1000, endKm: s.s1 / 1000, segs: [s] });
+    if (last && last.label === s.sectionLabel) { last.endKm = s.s1 / 1000; last.segs.push(s); }
+    else runs.push({ exposure: s.exposure, label: s.sectionLabel, phase: s.phase, startKm: s.s0 / 1000, endKm: s.s1 / 1000, segs: [s] });
   }
   const med = (xs) => { const a = xs.filter((x) => x != null).sort((p, q) => p - q); return a.length ? a[a.length >> 1] : null; };
   for (const r of runs) {
@@ -341,14 +353,36 @@
     return pl;
   });
 
-  // 跨堤引道標示
-  const rampLayer = L.layerGroup().addTo(map);
-  const ramps = segs.filter((s) => s.rampOverLevee);
-  for (const s of ramps) {
-    L.circleMarker([s.lat, s.lon], {
-      radius: 6, color: '#ffffff', weight: 2, fillColor: '#fab219', fillOpacity: 1,
-    }).addTo(rampLayer).on('click', () => L.popup({ maxWidth: 300 })
-      .setLatLng([s.lat, s.lon]).setContent(tipHtml(s)).openOn(map));
+  // 路段分界點（來自實地分類的 waypoints）
+  const segAtKm = (km) => segs[Math.max(0, Math.min(segs.length - 1, Math.round(km * 1000 / M.segmentLenM)))];
+  const wps = (M.waypoints || []).map((w) => ({ ...w, seg: segAtKm(w.km) }));
+  const wpLayer = L.layerGroup().addTo(map);
+  for (const w of wps) {
+    L.circleMarker([w.seg.lat, w.seg.lon], {
+      radius: 6, color: '#0b0b0b', weight: 2, fillColor: '#ffffff', fillOpacity: 1,
+    }).addTo(wpLayer)
+      .bindTooltip('km ' + w.km.toFixed(1) + ' · ' + w.name + (w.role ? '（' + w.role + '）' : ''),
+        { direction: 'top', offset: [0, -6] })
+      .on('click', () => { showSeg(w.seg); });
+  }
+
+  // 自動幾何推測與實地分類不符之處
+  const diffRuns = [];
+  for (const s of segs) {
+    if (!s.autoExposure || s.autoExposure === s.exposure) continue;
+    const last = diffRuns[diffRuns.length - 1];
+    if (last && last.lastI === s.i - 1 && last.from === s.autoExposure && last.to === s.exposure) {
+      last.endKm = s.s1 / 1000; last.lastI = s.i; last.segs.push(s);
+    } else {
+      diffRuns.push({ startKm: s.s0 / 1000, endKm: s.s1 / 1000, lastI: s.i,
+                      from: s.autoExposure, to: s.exposure, segs: [s] });
+    }
+  }
+  const diffLayer = L.layerGroup();
+  for (const d of diffRuns) {
+    L.polyline(d.segs.map((s) => s.a).concat([d.segs[d.segs.length - 1].b]), {
+      color: '#d03b3b', weight: 11, opacity: .35, lineCap: 'round', interactive: false,
+    }).addTo(diffLayer);
   }
 
   const cursor = L.circleMarker([0, 0], {
@@ -358,12 +392,16 @@
   function tipHtml(s) {
     const e = EXP[s.exposure];
     const rows = [
-      ['曝露度', e.name + (s.rampOverLevee ? '（跨堤引道）' : '') + (s.exposureFilled ? '（形態學補）' : '')],
+      ['曝露度', e.name + (s.phase ? '（' + (s.phase === 'climb' ? '上坡' : '下坡') + '）' : '')],
+      ['路段', s.sectionLabel || '—'],
       ['里程', (s.s0 / 1000).toFixed(2) + ' – ' + (s.s1 / 1000).toFixed(2) + ' km'],
       ['行進方位', s.bearing.toFixed(0) + '°'],
       ['坡度', s.gradePct.toFixed(2) + ' %'],
       ['高度', s.ele.toFixed(1) + ' m'],
       ['離主要水岸', s.distWaterM + ' m' + (s.nearWater ? '（' + s.nearWater + '）' : '')],
+      ['自動幾何推測', !s.autoExposure ? '—'
+        : (s.autoExposure === s.exposure ? EXP[s.autoExposure].name + ' ✓ 一致'
+           : EXP[s.autoExposure].name + ' ✗ 與實地不符')],
       ['實測速度', s.obsSpeedKmh == null ? '—' : s.obsSpeedKmh.toFixed(1) + ' km/h'],
       ['最近河道走向', s.channelAxisDeg == null ? '—' : s.channelAxisDeg.toFixed(0) + '° 軸向' +
         (s.channelName ? '（' + s.channelName + '）' : '')],
@@ -444,36 +482,49 @@
     }
   }
 
-  // ---------- 需人眼確認的路段 ----------
-  function renderFlags() {
-    const host = $('flags');
+  // ---------- 路段清單（實地分類） ----------
+  function zoomRun(r) {
+    map.fitBounds(L.latLngBounds(r.segs.map((s) => s.a).concat(r.segs.map((s) => s.b))), { padding: [40, 40] });
+    showSeg(r.segs[Math.floor(r.segs.length / 2)]);
+  }
+
+  function renderSections() {
+    const host = $('sections');
     host.innerHTML = '';
-    const items = [];
-
-    for (const s of ramps) {
-      items.push({
-        ic: '◆', seg: s,
-        tx: 'km <b>' + (s.s0 / 1000).toFixed(1) + '</b> 跨堤引道 — 坡度 <b>' + s.gradePct.toFixed(1) +
-            '</b>%、離水僅 <b>' + s.distWaterM + '</b> m、高度 <b>' + s.ele.toFixed(0) +
-            '</b> m。原判山區，已改判河濱。',
-      });
-    }
     for (const r of runs) {
-      if (r.km >= 0.5) continue;
-      items.push({
-        ic: '▲', seg: r.segs[0],
-        tx: 'km <b>' + r.startKm.toFixed(1) + '–' + r.endKm.toFixed(1) + '</b> 僅 <b>' +
-            r.km.toFixed(1) + '</b> km 的孤立「' + EXP[r.exposure].name + '」段，中位離水 <b>' +
-            r.medWater + '</b> m。',
-      });
-    }
-
-    if (!items.length) { host.innerHTML = '<div class="flag"><span class="ic">✓</span><span class="tx">沒有可疑路段。</span></div>'; return; }
-    for (const it of items) {
       const b = document.createElement('button');
       b.className = 'flag';
-      b.innerHTML = '<span class="ic">' + it.ic + '</span><span class="tx">' + it.tx + '</span>';
-      b.onclick = () => { map.flyTo([it.seg.lat, it.seg.lon], 16, { duration: .7 }); showSeg(it.seg); };
+      b.innerHTML =
+        '<span class="ic" style="color:' + EXP[r.exposure].color + '">■</span>' +
+        '<span class="tx"><b>km ' + r.startKm.toFixed(1) + '–' + r.endKm.toFixed(1) + '</b> · ' +
+        EXP[r.exposure].name + (r.phase ? (r.phase === 'climb' ? '上坡' : '下坡') : '') + ' · ' +
+        r.km.toFixed(1) + ' km<br>' + r.label +
+        '<br>高度 ' + r.eleMin.toFixed(0) + '–' + r.eleMax.toFixed(0) + ' m' +
+        (r.medSpeed == null ? '' : ' · 中位速 <b>' + r.medSpeed.toFixed(1) + '</b> km/h') + '</span>';
+      b.onclick = () => zoomRun(r);
+      host.appendChild(b);
+    }
+  }
+
+  // ---------- 自動推測比對 ----------
+  function renderDiffs() {
+    const host = $('diffs');
+    host.innerHTML = '';
+    const agreeKm = segs.filter((s) => s.autoExposure === s.exposure).reduce((a, s) => a + s.len / 1000, 0);
+    $('diffTitle').textContent = '自動推測比對 · 一致 ' + (100 * agreeKm / M.totalKm).toFixed(1) + '%';
+    if (!diffRuns.length) {
+      host.innerHTML = '<div class="flag"><span class="ic">✓</span><span class="tx">完全一致。</span></div>';
+      return;
+    }
+    for (const d of diffRuns) {
+      const w = d.segs.map((s) => s.distWaterM).sort((a, b) => a - b);
+      const b = document.createElement('button');
+      b.className = 'flag';
+      b.innerHTML = '<span class="ic" style="color:#d03b3b">✗</span>' +
+        '<span class="tx"><b>km ' + d.startKm.toFixed(1) + '–' + d.endKm.toFixed(1) + '</b> (' +
+        (d.endKm - d.startKm).toFixed(1) + ' km)<br>推測 ' + EXP[d.from].name + ' → 實為 ' +
+        EXP[d.to].name + '，中位離水 <b>' + w[w.length >> 1] + '</b> m</span>';
+      b.onclick = () => zoomRun(d);
       host.appendChild(b);
     }
   }
@@ -481,23 +532,19 @@
   // ---------- 表格檢視（補足水綠對比不足的 relief 要求） ----------
   function renderTable() {
     const head = '<thead><tr><th class="l">里程 (km)</th><th class="l">曝露度</th>' +
-      '<th>長度</th><th>中位離水</th><th>高度</th><th>中位速</th></tr></thead>';
+      '<th>長度</th><th>高度 (m)</th><th>中位速</th><th>中位離水</th></tr></thead>';
     const body = runs.map((r, i) =>
       '<tr data-i="' + i + '"><td class="l">' + r.startKm.toFixed(1) + '–' + r.endKm.toFixed(1) + '</td>' +
-      '<td class="l"><span class="sw" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' +
-      EXP[r.exposure].color + ';margin-right:5px"></span>' + EXP[r.exposure].name + '</td>' +
-      '<td>' + r.km.toFixed(1) + '</td><td>' + r.medWater + ' m</td>' +
+      '<td class="l"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' +
+      EXP[r.exposure].color + ';margin-right:5px"></span>' + EXP[r.exposure].name +
+      (r.phase ? (r.phase === 'climb' ? '↑' : '↓') : '') + '</td>' +
+      '<td>' + r.km.toFixed(1) + '</td>' +
       '<td>' + r.eleMin.toFixed(0) + '–' + r.eleMax.toFixed(0) + '</td>' +
-      '<td>' + (r.medSpeed == null ? '—' : r.medSpeed.toFixed(1)) + '</td></tr>').join('');
+      '<td>' + (r.medSpeed == null ? '—' : r.medSpeed.toFixed(1)) + '</td>' +
+      '<td>' + r.medWater + '</td></tr>').join('');
     const t = $('tbl');
     t.innerHTML = head + '<tbody>' + body + '</tbody>';
-    t.querySelectorAll('tbody tr').forEach((tr) => {
-      tr.onclick = () => {
-        const r = runs[+tr.dataset.i];
-        map.fitBounds(L.latLngBounds(r.segs.map((s) => s.a)), { padding: [40, 40] });
-        showSeg(r.segs[0]);
-      };
-    });
+    t.querySelectorAll('tbody tr').forEach((tr) => { tr.onclick = () => zoomRun(runs[+tr.dataset.i]); });
   }
 
   // ---------- 高度剖面 ----------
@@ -565,7 +612,7 @@
             class: 'runlab', x: (x0 + x1) / 2, y: stripY + STRIP_H - 2.5,
             'text-anchor': 'middle', fill: '#ffffff',
           });
-          t.textContent = EXP[r.exposure].name;
+          t.textContent = EXP[r.exposure].name + (r.phase ? (r.phase === 'climb' ? ' ↑' : ' ↓') : '');
           svg.appendChild(t);
         }
       }
@@ -578,12 +625,14 @@
       }
     }
 
-    // 跨堤引道在色帶上方打點，便於在剖面上定位
-    for (const s of ramps) {
-      svg.appendChild(mk('circle', {
-        cx: x((s.s0 / 1000 + s.s1 / 1000) / 2), cy: stripY - 3.5, r: 2.6,
-        fill: '#fab219', stroke: '#fcfcfb', 'stroke-width': 1,
+    // 路段分界點：貫穿色帶的刻線，便於核對 km 邊界
+    for (const w of wps) {
+      const wx = x(w.km);
+      svg.appendChild(mk('line', {
+        x1: wx, x2: wx, y1: stripY - 4, y2: stripY + STRIP_H + 3,
+        stroke: '#0b0b0b', 'stroke-width': 1.25, opacity: .75,
       }));
+      svg.appendChild(mk('circle', { cx: wx, cy: stripY - 5.5, r: 2.4, fill: '#fcfcfb', stroke: '#0b0b0b', 'stroke-width': 1.25 }));
     }
 
     pGeom.cur = mk('line', { class: 'bl', y1: P.t, y2: stripY + STRIP_H, stroke: '#0b0b0b', 'stroke-width': 1.5, opacity: 0 });
@@ -610,14 +659,19 @@
 
   // ---------- 圖層開關 ----------
   $('tWater').onchange = (e) => e.target.checked ? waterLayer.addTo(map) : map.removeLayer(waterLayer);
-  $('tRamp').onchange = (e) => e.target.checked ? rampLayer.addTo(map) : map.removeLayer(rampLayer);
+  $('tWp').onchange = (e) => e.target.checked ? wpLayer.addTo(map) : map.removeLayer(wpLayer);
+  $('tDiff').onchange = (e) => {
+    $('secDiff').hidden = !e.target.checked;
+    if (e.target.checked) { diffLayer.addTo(map); diffLayer.bringToBack(); renderDiffs(); }
+    else map.removeLayer(diffLayer);
+  };
   $('tTable').onchange = (e) => { $('secTable').hidden = !e.target.checked; if (e.target.checked) renderTable(); };
 
   let rt;
   window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderProfile, 120); });
 
   renderLegend();
-  renderFlags();
+  renderSections();
   renderProfile();
   console.log('[環騎臺北] ' + segs.length + ' 段已載入；曝露度 ' +
     Object.entries(totals).map(([k, v]) => EXP[k].name + ' ' + v.km.toFixed(1) + ' km').join('、'));

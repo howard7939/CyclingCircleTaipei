@@ -5,7 +5,11 @@
   "type": "module",
   "description": "環騎臺北 騎乘資訊網站：風場/降雨/紫外線分析與順逆時針建議",
   "scripts": {
+    "build:data": "node scripts/preprocess-route.mjs && node scripts/apply-sections.mjs",
     "preprocess": "node scripts/preprocess-route.mjs",
+    "sections": "node scripts/apply-sections.mjs",
+    "fetch:water": "node scripts/fetch-osm-water.mjs",
+    "dev": "node --env-file=.env server/index.mjs",
     "dev:server": "node --env-file=.env server/index.mjs"
   },
   "engines": { "node": ">=20" }

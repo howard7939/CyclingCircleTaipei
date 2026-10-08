@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "環騎臺北路線的實地路段分類（權威來源，由騎乘者提供）。",
+    "這份檔案可以手動編輯：改動後重跑 node scripts/apply-sections.mjs 即可。",
+    "km 以 GPX 軌跡的累積距離為準（全長 65.72 km）。",
+    "exposure 的物理意義是風程/遮蔽程度：",
+    "  riverside 河濱 floodplain，上風無建物，風程長 -> 風影響最大",
+    "  urban     市區街廓，建物遮蔽、粗糙長度大 -> 風影響中等",
+    "  mountain  山區，地形遮蔽且功率以重力為主 -> 風影響最小"
+  ],
+  "source": "騎乘者實地分類",
+  "providedAt": "2026-10-08",
+  "totalKm": 65.72,
+  "waypoints": [
+    { "km": 0.0,   "name": "社子大橋", "role": "起點" },
+    { "km": 32.9,  "name": "景美溪右岸自行車道終點（木柵）" },
+    { "km": 33.6,  "name": "福德坑爬坡起點" },
+    { "km": 37.8,  "name": "至高點" },
+    { "km": 42.1,  "name": "中華科大" },
+    { "km": 46.1,  "name": "基隆河左岸自行車道終點（南港）" },
+    { "km": 65.72, "name": "社子大橋", "role": "終點" }
+  ],
+  "sections": [
+    { "fromKm": 0.0,   "toKm": 32.9,  "exposure": "riverside", "label": "河濱自行車道（淡水河→新店溪→景美溪）" },
+    { "fromKm": 32.9,  "toKm": 33.6,  "exposure": "urban",     "label": "市區道路（木柵→福德坑）" },
+    { "fromKm": 33.6,  "toKm": 37.8,  "exposure": "mountain",  "label": "山區上坡（福德坑→至高點）", "phase": "climb" },
+    { "fromKm": 37.8,  "toKm": 42.1,  "exposure": "mountain",  "label": "山區下坡（至高點→中華科大）", "phase": "descent" },
+    { "fromKm": 42.1,  "toKm": 46.1,  "exposure": "urban",     "label": "市區道路（中華科大→南港）" },
+    { "fromKm": 46.1,  "toKm": 65.72, "exposure": "riverside", "label": "河濱自行車道（基隆河左岸）" }
+  ]
+}
