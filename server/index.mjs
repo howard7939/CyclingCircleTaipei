@@ -12,6 +12,11 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cwaStations, cwaRain, cwaUv, openMeteo } from './sources.mjs';
+import {
+  DEFAULT_PARAMS, airDensity, buildSpeedCurve, openWindField,
+  analyzeDirections, selfTest, toUV, toSpeedDir,
+} from './wind-model.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = join(ROOT, 'web');
@@ -63,6 +68,131 @@ async function serveFile(res, absPath) {
   }
 }
 
+// ---------- 路線資料（啟動時載入一次） ----------
+let ROUTE = null;
+async function getRoute() {
+  if (ROUTE) return ROUTE;
+  const r = JSON.parse(await readFile(join(DATA, 'route.json'), 'utf8'));
+  if (!r.segments?.length) throw new Error('route.json 沒有 segments，先執行 npm run build:data');
+  if (r.segments.some((s) => !s.exposure)) throw new Error('有路段缺 exposure，先執行 npm run sections');
+  r._curve = buildSpeedCurve(r.segments);
+  ROUTE = r;
+  return r;
+}
+
+const SAMPLE_N = 12;
+const BBOX_BUFFER = 0.18; // 約 18 km。再大會抓進宜蘭/桃園，隔著山脈不具代表性。
+
+/** 目前的騎乘條件：風場、方向建議、降雨、紫外線 */
+async function getConditions({ full = false } = {}) {
+  const route = await getRoute();
+  const M = route.meta, segs = route.segments;
+
+  const bbox = {
+    minLat: M.bbox.minLat - BBOX_BUFFER, maxLat: M.bbox.maxLat + BBOX_BUFFER,
+    minLon: M.bbox.minLon - BBOX_BUFFER, maxLon: M.bbox.maxLon + BBOX_BUFFER,
+  };
+  const samplePts = Array.from({ length: SAMPLE_N }, (_, i) => {
+    const s = segs[Math.floor(i * segs.length / SAMPLE_N)];
+    return { name: 'km' + (s.s0 / 1000).toFixed(0), lat: s.lat, lon: s.lon };
+  });
+
+  const [obs, rain, uv, om] = await Promise.all([
+    cwaStations(bbox).catch((e) => ({ error: e.message, stations: [] })),
+    cwaRain(bbox).catch((e) => ({ error: e.message, stations: [] })),
+    cwaUv().catch((e) => ({ error: e.message, stations: [] })),
+    openMeteo(samplePts),
+  ]);
+
+  // 測站風的向量平均（只取低地站；高山站風速與盆地不可比）
+  const withWind = obs.stations.filter((s) => s.windMs != null && s.windFromDeg != null);
+  const low = withWind.filter((s) => s.altM == null || s.altM < 200);
+  let su = 0, sv = 0, ssum = 0, tsum = 0, tn = 0;
+  for (const s of low) {
+    const c = toUV(s.windMs, s.windFromDeg);
+    su += c.u; sv += c.v; ssum += s.windMs;
+    if (s.tempC != null) { tsum += s.tempC; tn++; }
+  }
+  const stVec = low.length ? toSpeedDir(su / low.length, sv / low.length) : null;
+  const stScalar = low.length ? ssum / low.length : null;
+  const tempC = tn ? tsum / tn : 25;
+
+  let ou = 0, ov = 0;
+  for (const p of om.points) { const c = toUV(p.current.windMs, p.current.windFromDeg); ou += c.u; ov += c.v; }
+  const omVec = toSpeedDir(ou / om.points.length, ov / om.points.length);
+
+  const angDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+
+  const params = { ...DEFAULT_PARAMS, rho: +airDensity(tempC, 1013).toFixed(3) };
+  const field = openWindField(segs, om.points);
+  const analysis = analyzeDirections(segs, field, M.gpxOrientation, params, route._curve);
+  const noise = selfTest(segs, M.gpxOrientation, { windMs: omVec.speedMs, fromDeg: omVec.fromDeg });
+
+  const rs = rain.stations.filter((s) => s.hr1 != null);
+  const out = {
+    generatedAt: new Date().toISOString(),
+    route: { totalKm: M.totalKm, segmentCount: segs.length, orientation: M.gpxOrientation },
+    wind: {
+      openTerrain: { speedMs: +omVec.speedMs.toFixed(2), fromDeg: +omVec.fromDeg.toFixed(0) },
+      stationsVector: stVec ? { speedMs: +stVec.speedMs.toFixed(2), fromDeg: +stVec.fromDeg.toFixed(0) } : null,
+      stationsScalarMs: stScalar ? +stScalar.toFixed(2) : null,
+      stationCount: low.length,
+      directionAgreeDeg: stVec ? +angDiff(stVec.fromDeg, omVec.fromDeg).toFixed(0) : null,
+      shelterRatio: stScalar ? +(omVec.speedMs / stScalar).toFixed(2) : null,
+      fieldSpeedRangeMs: [+Math.min(...field.map((f) => f.speedMs)).toFixed(2),
+                          +Math.max(...field.map((f) => f.speedMs)).toFixed(2)],
+      obsTime: obs.stations[0]?.obsTime ?? null,
+      modelTime: om.points[0]?.current?.time ?? null,
+    },
+    direction: {
+      recommend: Math.abs(analysis.deltaKJ) < Math.abs(noise.deltaKJ) * 3 ? null : analysis.recommend,
+      deltaKJ: analysis.deltaKJ,
+      deltaPct: analysis.deltaPct,
+      deltaSec: analysis.deltaSec,
+      estPowerW: analysis.estPowerW,
+      noiseFloorKJ: +Math.abs(noise.deltaKJ).toFixed(3),
+      snr: +(Math.abs(analysis.deltaKJ) / Math.max(1e-6, Math.abs(noise.deltaKJ))).toFixed(0),
+      contributionKJ: analysis.contributionKJ,
+      byDirection: Object.fromEntries(Object.entries(analysis.directions).map(([k, v]) => [k, {
+        aeroWorkKJ: v.aeroWorkKJ, timeMin: v.timeMin, byExposure: v.byExposure,
+      }])),
+    },
+    rain: {
+      stationCount: rs.length,
+      rainingNow: rs.filter((s) => (s.hr1 ?? 0) > 0).length,
+      rainedPast6hr: rs.filter((s) => (s.hr6 ?? 0) > 0).length,
+      wettest: rs.filter((s) => (s.hr1 ?? 0) > 0).sort((a, b) => b.hr1 - a.hr1).slice(0, 12)
+        .map((s) => ({ name: s.name, lat: s.lat, lon: s.lon, hr1: s.hr1, hr3: s.hr3, hr6: s.hr6, hr24: s.hr24,
+                       area: (s.county || '') + (s.town || '') })),
+    },
+    uv: {
+      nowRange: [Math.min(...om.points.map((p) => p.current.uvIndex ?? 0)),
+                 Math.max(...om.points.map((p) => p.current.uvIndex ?? 0))],
+      isDay: om.points[0]?.current?.isDay ?? null,
+      cwaTaipeiDailyMax: uv.stations?.find((s) => s.id === '466920')?.uvIndex ?? null,
+      cwaNote: uv.note ?? null,
+    },
+    params,
+    sources: {
+      cwaObs: { cache: obs._cache, ageSec: obs._ageSec, error: obs.error ?? obs._error ?? null },
+      cwaRain: { cache: rain._cache, ageSec: rain._ageSec, error: rain.error ?? rain._error ?? null },
+      cwaUv: { cache: uv._cache, ageSec: uv._ageSec, error: uv.error ?? uv._error ?? null },
+      openMeteo: { cache: om._cache, ageSec: om._ageSec, error: om._error ?? null },
+    },
+  };
+
+  if (full) {
+    out.segments = segs.map((s, i) => ({
+      i, km: +(s.s0 / 1000).toFixed(2), exposure: s.exposure,
+      openWindMs: +field[i].speedMs.toFixed(2), openWindFromDeg: +field[i].fromDeg.toFixed(0),
+      cw: analysis.directions.CW.perSeg[i], ccw: analysis.directions.CCW.perSeg[i],
+    }));
+    out.stations = low.map((s) => ({ id: s.id, name: s.name, lat: s.lat, lon: s.lon,
+      altM: s.altM, windMs: s.windMs, windFromDeg: s.windFromDeg, tempC: s.tempC }));
+  }
+  return out;
+}
+
 const server = createServer(async (req, res) => {
   const t0 = Date.now();
   let url;
@@ -80,6 +210,11 @@ const server = createServer(async (req, res) => {
         cwaKeyPresent: Boolean(process.env.CWA_API_KEY),
         uptimeSec: Math.round(process.uptime()),
       });
+    }
+
+    if (p === '/api/conditions') {
+      const full = url.searchParams.get('full') === '1';
+      return sendJson(res, 200, await getConditions({ full }));
     }
 
     if (p.startsWith('/api/')) {
