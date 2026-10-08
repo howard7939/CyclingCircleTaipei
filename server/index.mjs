@@ -18,7 +18,7 @@ import {
   toUV, toSpeedDir, loadParams, exposureDisplacement, solveSpeedMs, USER_TUNABLE,
 } from './wind-model.mjs';
 import { buildWindField } from './wind-field.mjs';
-import { stationWetness, surfaceAlongRoute, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
+import { stationWetness, surfaceAlongRoute, applyRadarNow, uvAnalysis, SURFACE_DEFAULTS } from './surface.mjs';
 import { fetchRadar, radarAlongRoute, echoCells, dbzToRainMmPerH, RADAR } from './radar.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -171,21 +171,8 @@ async function getConditions({ full = false, overrides = null } = {}) {
             'Marshall-Palmer Z=200R^1.6 換算雨強。雷達會漏掉低層地形雨，' +
             '且 dBZ 與地面雨量有 2 倍以上不確定度，故與雨量站互補而非取代。',
     };
-    // 正在下雨的路段：水膜至少要達到該雨強的平衡厚度
-    for (let i = 0; i < segs.length; i++) {
-      const R = ra.perSegment[i].rainMmPerH;
-      surf[i].radarDbz = ra.perSegment[i].dbz;
-      surf[i].radarRainMmPerH = R;
-      if (R > 0) {
-        const eq = Math.min(SURFACE_DEFAULTS.maxFilmMm, SURFACE_DEFAULTS.filmPerSqrtRain * Math.sqrt(R));
-        if (eq > surf[i].filmMm) {
-          surf[i].filmMm = +eq.toFixed(3);
-          surf[i].level = eq >= SURFACE_DEFAULTS.wetFilmMm ? 'wet'
-                        : eq >= SURFACE_DEFAULTS.dampFilmMm ? 'damp' : 'dry';
-          surf[i].fromRadar = true;
-        }
-      }
-    }
+    // 「現在」以雷達為準覆寫；「過去」的水膜歷史維持由雨量站積分而來
+    radar.applied = applyRadarNow(surf, ra.perSegment);
   } else {
     radar = { available: false, error: radarFrame?.error ?? '未取得雷達資料' };
   }
@@ -296,8 +283,19 @@ async function getConditions({ full = false, overrides = null } = {}) {
                        dryInHours: w.dryInHours, dryNote: w.dryNote, evapMmPerH: w.evapMmPerH })),
       evapNowMmPerH: wetStations.length ? wetStations[0].evapMmPerH : null,
       thresholds: { wetFilmMm: SURFACE_DEFAULTS.wetFilmMm, dampFilmMm: SURFACE_DEFAULTS.dampFilmMm },
-      note: '水膜質量平衡：film += 雨量，film −= Penman 蒸發（逐時積分過去 24 小時）。' +
-            '雨量來自 CWA 雨量站（空間密度高），乾燥條件來自 Open-Meteo 逐時日射/風/濕度。',
+      // 來源分工（依騎乘者指定）
+      sources: {
+        now: radar?.available ? 'radar' : 'stations',
+        past: 'stations',
+        drying: 'open-meteo-hourly',
+        nowCoveredSegments: radar?.applied?.coveredSegments ?? 0,
+        nowRainingSegments: radar?.applied?.rainingSegments ?? 0,
+        filmUpgradedByRadar: radar?.applied?.upgradedSegments ?? 0,
+      },
+      note: '【現在】以雷達回波為準（1.3 km 網格），雨量站為輔（雷達範圍外時退回測站）。' +
+            '【過去/地濕】以雨量站為主 —— 雷達數值網格只有最新一張、無歷史，' +
+            '而雨量站有 1/3/6/12/24 小時累積且測的是地面實況。' +
+            '【乾燥】Open-Meteo 逐時日射/風/濕度，以 Penman 公式逐時積分。',
     },
     params,
     sources: {

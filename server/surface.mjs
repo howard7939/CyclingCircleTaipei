@@ -19,9 +19,16 @@
  * 文獻指出蒸發的驅動強弱依序為「日射 > 氣溫 > 水氣壓差 > 風速」，
  * 這個公式的項次權重與之一致（輻射項通常主導白天，空氣動力項主導夜間）。
  *
- * 雨量來源分工（與風場同樣的原則，各用各的強項）：
- *   CWA 雨量站   決定「哪裡下了多少」—— 221 站的空間密度遠勝模式格點
- *   Open-Meteo   決定「當時的乾燥條件」—— 逐時日射/風/濕度/氣溫，測站沒有
+ * 資料來源分工（依騎乘者指定）：
+ *   【現在下不下雨】   以雷達回波為準（1.3 km 網格），氣象測站為輔
+ *                      雷達的空間解析度遠勝站距 5-10 km 的雨量站；雨量站會把
+ *                      一個點的雨「抹」到周圍 10 km，判斷「我現在這裡有沒有雨」
+ *                      並不可靠。雷達無涵蓋或取得失敗時才退回測站。
+ *   【過去（地濕）】   以氣象測站為主
+ *                      雷達的數值網格只有最新一張、無歷史（實測時戳版本 404），
+ *                      而雨量站有 1/3/6/12/24 小時的累積桶，正是地濕要的量。
+ *                      且雨量站測的是地面實際累積，雷達測的是空中回波。
+ *   【乾燥條件】       Open-Meteo 逐時日射/風/濕度/氣溫（測站沒有這些）
  *
  * 夜間 Rn 為負（長波淨輻射散失），公式會給出負的 E，也就是結露。這是真的：
  * 清晨的路面可能在沒下雨的情況下仍然是濕的，模型保留這個行為。
@@ -188,7 +195,11 @@ export function stationWetness(st, hourly, nowIso, cfg = SURFACE_DEFAULTS) {
   };
 }
 
-/** 把逐站的雨與濕度內插到路段（IDW，只取半徑內的站） */
+/**
+ * 把逐站的雨與濕度內插到路段（IDW，只取半徑內的站）。
+ * 這一層只負責「過去」—— 由雨量站累積桶積分出來的水膜歷史。
+ * 「現在」由 applyRadarNow() 以雷達覆寫，見該函式說明。
+ */
 export function surfaceAlongRoute(segments, wetStations, cfg = SURFACE_DEFAULTS) {
   return segments.map((s) => {
     let wf = 0, wr = 0, sw = 0, nearest = null, nd = Infinity, maxRain1 = 0;
@@ -209,8 +220,52 @@ export function surfaceAlongRoute(segments, wetStations, cfg = SURFACE_DEFAULTS)
       maxNearbyRain1hrMm: +maxRain1.toFixed(1),
       nearestStation: nearest ? nearest.name : null,
       nearestKm: +nd.toFixed(1),
+      // 「過去」的水膜，先記下來；雷達覆寫後仍保留供比對
+      filmFromHistoryMm: +film.toFixed(3),
+      rainNowSource: 'station',
+      rainNowMmPerH: +rain1.toFixed(2),
+      rainingNow: rain1 > 0.05,
     };
   });
+}
+
+/**
+ * 以雷達覆寫「現在」的降雨判定。
+ *
+ * 為什麼現在要以雷達為準：雨量站站距 5-10 km，IDW 會把某一站的雨抹到周圍
+ * 十公里，拿來回答「我現在騎到這裡有沒有在下雨」並不可靠。雷達是 1.3 km 的
+ * 連續場，正好補上這個解析度缺口。
+ *
+ * 為什麼過去仍以測站為準：雷達的數值網格只有最新一張（實測時戳版本 404），
+ * 而雨量站提供 1/3/6/12/24 小時累積，正是地濕模型需要的量；且測站測地面
+ * 實際累積，雷達測空中回波，兩者在「已經下了多少」這件事上測站更直接。
+ *
+ * @param surf  surfaceAlongRoute 的輸出（會被就地修改）
+ * @param radarPerSeg  radarAlongRoute 的 perSegment（dbz / rainMmPerH / band）
+ */
+export function applyRadarNow(surf, radarPerSeg, cfg = SURFACE_DEFAULTS) {
+  let covered = 0, raining = 0, upgraded = 0;
+  for (let i = 0; i < surf.length; i++) {
+    const r = radarPerSeg[i];
+    if (!r || r.band === 'unknown') continue;   // 雷達範圍外 -> 維持測站判定
+    covered++;
+    surf[i].rainNowSource = 'radar';
+    surf[i].radarDbz = r.dbz;
+    surf[i].rainNowMmPerH = r.rainMmPerH;
+    surf[i].rainingNow = r.rainMmPerH > 0;
+    if (r.rainMmPerH > 0) {
+      raining++;
+      const eq = Math.min(cfg.maxFilmMm, cfg.filmPerSqrtRain * Math.sqrt(r.rainMmPerH));
+      if (eq > surf[i].filmMm) {
+        surf[i].filmMm = +eq.toFixed(3);
+        surf[i].fromRadar = true;
+        upgraded++;
+      }
+    }
+    surf[i].level = surf[i].filmMm >= cfg.wetFilmMm ? 'wet'
+                  : surf[i].filmMm >= cfg.dampFilmMm ? 'damp' : 'dry';
+  }
+  return { coveredSegments: covered, rainingSegments: raining, upgradedSegments: upgraded };
 }
 
 /**

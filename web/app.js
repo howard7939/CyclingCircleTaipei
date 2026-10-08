@@ -414,6 +414,14 @@
       ['行進方位', (isCW() ? ((s.bearing + 180) % 360).toFixed(0) : s.bearing.toFixed(0)) + '°'],
       ['坡度', s.gradePct.toFixed(2) + ' %'],
       ['開闊地風', c.openWindMs.toFixed(2) + ' m/s @ ' + c.openWindFromDeg + '°'],
+      ['路面水膜', !c.surf ? '—' : c.surf.filmMm.toFixed(3) + ' mm（' +
+        ({ wet: '濕', damp: '潮濕', dry: '乾' }[c.surf.level]) + '）'],
+      ['　現在降雨', !c.surf ? '—'
+        : (c.surf.rainingNow ? c.surf.rainNowMmPerH + ' mm/h' : '無') +
+          '（' + (c.surf.rainNowSource === 'radar' ? '雷達' : '測站') + '）' +
+          (c.surf.radarDbz != null ? ' ' + c.surf.radarDbz + ' dBZ' : '')],
+      ['　歷史水膜', !c.surf ? '—'
+        : (c.surf.filmFromHistoryMm ?? c.surf.filmMm).toFixed(3) + ' mm（測站）'],
       ['— 逆時針 —', ''],
       ['　逆風分量', c.ccw.headwindMs.toFixed(2) + ' m/s'],
       ['　速度', c.ccw.speedKmh.toFixed(1) + ' km/h' + (c.ccw.atCap ? '（煞車上限）' : '')],
@@ -697,7 +705,10 @@
       '影像要建顏色對照表才能用、配色一改就壞，且顏色是分級量化的。' +
       '網格解析度 0.0125°（約 1.3 km），比雨量站站距（5–10 km）細 4–6 倍，' +
       '以 Marshall-Palmer（Z=200R^1.6）換算雨強。<br>' +
-      '雷達只修正「現在」—— 過去 24 小時的降雨歷史仍由雨量站提供，雷達沒有歷史資料。<br>' +
+      '<b>來源分工</b>：【現在下不下雨】以雷達為準（1.3 km），雨量站為輔 —— 站距 5–10 km 的 IDW ' +
+      '會把一站的雨抹到周圍十公里，無法回答「我這裡現在有沒有雨」。' +
+      '【過去／地濕】以雨量站為主 —— 雷達的數值網格只有最新一張、無歷史（實測時戳版本 404），' +
+      '而雨量站有 1/3/6/12/24 小時累積，且測的是地面實況而非空中回波。<br>' +
       '<b>限制</b>：雷達會漏掉低層地形雨（實測大屯山、擎天崗回報 0.5 mm/h 但雷達無回波，' +
       '波束在遠處已抬升掃不到山區低層）；dBZ 與地面雨量有 2 倍以上不確定度' +
       '（雨幡、亮帶污染）。因此雷達與雨量站互補，不互相取代。<br><br>' +
@@ -741,6 +752,10 @@
       '<div class="s" style="font-size:11.5px;color:var(--ink-2)">' +
       '目前蒸發率 <b>' + sf.evapNowMmPerH + '</b> mm/h' +
       (sf.evapNowMmPerH < 0 ? '（<b style="color:#d03b3b">結露中</b>，路面不會變乾）' : '') +
+      '<br><span style="color:var(--ink-muted)">現在：<b>' +
+      (sf.sources?.now === 'radar' ? '雷達回波' : '雨量站') + '</b>（涵蓋 ' +
+      (sf.sources?.nowCoveredSegments ?? 0) + '/' + S.route.segments.length + ' 段）　' +
+      '過去／地濕：<b>雨量站</b>　乾燥：<b>模式逐時</b></span>' +
       '</div>';
 
     renderRadarCard();
