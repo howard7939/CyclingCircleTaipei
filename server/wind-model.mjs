@@ -5,9 +5,9 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_PARAMS, USER_TUNABLE } from './physics.mjs';
+import { DEFAULT_PARAMS, USER_TUNABLE } from '../web/physics.mjs';
 
-export * from './physics.mjs';
+export * from '../web/physics.mjs';
 
 const DATA_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../data');
 const PARAMS_FILE = resolve(DATA_DIR, 'model-params.json');

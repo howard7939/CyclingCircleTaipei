@@ -1,5 +1,13 @@
 /* 環騎臺北 — 騎乘條件前端
-   資料全部來自 /api/conditions?full=1，授權碼只存在於伺服器端。 */
+ *
+ * 兩種資料來源，自動偵測：
+ *   伺服器模式  /api/conditions?full=1 —— 後端算好方向分析
+ *   靜態模式    data/conditions.json  —— 只有觀測，方向分析在瀏覽器用
+ *               physics.mjs 自己算（與後端同一份程式碼）
+ * 兩種模式下授權碼都不會出現在前端。
+ */
+import { expandRoute, computeConditions } from './static-mode.mjs';
+
 (function () {
   'use strict';
 
@@ -78,7 +86,8 @@
   };
 
   const S = {
-    route: null, cond: null, dir: 'CCW', color: 'wind', leadMin: 0,
+    route: null, cond: null, snapshot: null, static: false,
+    dir: 'CCW', color: 'wind', leadMin: 0,
     map: null, segLayer: null, casing: null, arrowLayer: null,
     stationLayer: null, rainLayer: null, lines: [], cursor: null,
     runs: [], defaults: null, pGeom: null, inflight: null,
@@ -107,15 +116,31 @@
     return q.toString();
   }
 
+  /** 目前的使用者參數（兩種模式共用） */
+  function currentOverrides() {
+    return {
+      targetPowerW: $('pw').value, massKg: $('mk').value,
+      cdaM2: $('cda').value, crr: $('crr').value,
+      exposureK: { riverside: $('kr').value, urban: $('ku').value, mountain: $('km_').value },
+    };
+  }
+
   let reqSeq = 0;
   async function refresh() {
     const my = ++reqSeq;
     $('busy').classList.add('on');
     try {
-      const j = await getJson('/api/conditions?' + paramQuery(), '取得騎乘條件');
-      if (my !== reqSeq) return;           // 已有更新的請求，丟棄這次結果
-      S.cond = j;
+      if (S.static) {
+        // 靜態模式：快照已在手上，只要用新參數重算 —— 不需任何網路往返
+        S.cond = computeConditions(S.snapshot, S.route, currentOverrides());
+      } else {
+        const j = await getJson('/api/conditions?' + paramQuery(), '取得騎乘條件');
+        if (my !== reqSeq) return;         // 已有更新的請求，丟棄這次結果
+        S.cond = j;
+      }
       renderAll();
+    } catch (e) {
+      if (S.static) { fail('重算失敗：' + e.message); } else { throw e; }
     } finally {
       if (my === reqSeq) $('busy').classList.remove('on');
     }
@@ -715,8 +740,12 @@
       '<dt>下坡上限</dt><dd>' + p.maxSpeedKmh + ' km/h</dd>' +
       '<dt>校正 R²</dt><dd>' + (p._riderProfile ? p._riderProfile.r2 : '—') + '</dd>' +
       '<dt>數值底線</dt><dd>' + c.direction.noiseFloorSec + ' s</dd>' +
-      '<dt>降雨中測站</dt><dd>' + c.rain.rainingNow + ' / ' + c.rain.stationCount + '</dd>' +
-      '<dt>即時 UV</dt><dd>' + (c.uv.isDay ? c.uv.nowRange.join('–') : '夜間') + '</dd>';
+      // 改用 surface（雨量的正式來源）；c.rain 在靜態快照裡不存在。
+      // c.uv.nowRange 其實早已不存在（UV 改用 uvAnalysis 後欄位是 nowUv）——
+      // 夜間走 '夜間' 分支所以一直沒爆，白天開啟才會整頁掛掉。
+      '<dt>降雨中測站</dt><dd>' + (c.surface?.rainingStations ?? '—') + ' / ' +
+        (c.surface?.stationCount ?? '—') + '</dd>' +
+      '<dt>即時 UV</dt><dd>' + (c.uv?.isDay ? (c.uv.nowUv ?? '—') : '夜間') + '</dd>';
 
     const stale = Object.entries(src).filter(([, v]) => v.cache === 'stale' || v.error);
     const el = $('stale');
@@ -1095,8 +1124,16 @@
 
   // ---------- 啟動 ----------
   (async function init() {
-    S.route = await getJson('/data/route.json', '載入路線');
-    if (!S.route.segments?.length) fail('route.json 沒有 segments，請先執行 npm run build:data');
+    // 先試伺服器；沒有後端就走靜態快照
+    S.static = !(await fetch('/api/health').then((r) => r.ok).catch(() => false));
+    if (S.static) {
+      const min = await getJson('data/route.min.json', '載入路線（靜態）');
+      S.route = expandRoute(min);
+      S.snapshot = await getJson('data/conditions.json', '載入快照');
+    } else {
+      S.route = await getJson('/data/route.json', '載入路線');
+    }
+    if (!S.route.segments?.length) fail('路線沒有 segments，請先執行 npm run build:data');
     if (S.route.segments.some((s) => !s.exposure)) fail('有路段缺 exposure，請先執行 npm run sections');
 
     for (const s of S.route.segments) {
@@ -1111,15 +1148,18 @@
                                 M.segments?.length + '';
     $('hdrRoute').textContent = M.totalKm.toFixed(2) + ' km · ' + S.route.segments.length + ' 段 · 爬升 ' + M.elevGainM + ' m';
 
-    const pr = await getJson('/api/params', '讀取參數');
-    const cur = pr.current;
+    const cur = S.static ? S.snapshot.params : (await getJson('/api/params', '讀取參數')).current;
     S.defaults = { pw: cur.targetPowerW, mk: cur.massKg, cda: cur.cdaM2, crr: cur.crr,
                    kr: cur.exposureK.riverside, ku: cur.exposureK.urban, km_: cur.exposureK.mountain };
     applyDefaults();
 
-    S.stride = 1;
-    const probe = await getJson('/api/conditions?full=1&' + paramQuery().replace('full=1&',''), '取得騎乘條件');
-    S.cond = probe; S.stride = probe.displayStride || 1;
+    S.stride = Math.max(1, Math.round(S.route.segments.length / 700));
+    if (S.static) {
+      S.cond = computeConditions(S.snapshot, S.route, currentOverrides());
+    } else {
+      S.cond = await getJson('/api/conditions?' + paramQuery(), '取得騎乘條件');
+      S.stride = S.cond.displayStride || S.stride;
+    }
     initMap();
     renderAll();
 
@@ -1158,7 +1198,8 @@
 
     let rt;
     window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderProfile, 150); });
-    setInterval(refresh, 10 * 60 * 1000);   // 每 10 分鐘自動更新
+    // 伺服器模式每 10 分鐘重抓；靜態模式的快照由 Actions 產生，重新整理才會更新
+    if (!S.static) setInterval(refresh, 10 * 60 * 1000);
   })();
 
   function applyDefaults() {

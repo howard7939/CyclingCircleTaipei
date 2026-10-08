@@ -138,6 +138,13 @@
         align-items:center;justify-content:center;z-index:900;font-size:13px;color:var(--ink-2)}
   #busy.on{display:flex}
 
+  /* 來源標示是授權條款的義務，不是裝飾 —— 固定顯示於頁尾，不折疊、不隱藏 */
+  #credits{flex:none;background:var(--surface);border-top:1px solid var(--hair);
+           padding:8px 16px 10px;font-size:11px;line-height:1.6;color:var(--ink-muted)}
+  #credits b{color:var(--ink-2)}
+  #credits a{color:var(--ink-2)}
+  #credits .dis{margin-top:3px;color:var(--ink-muted)}
+
   @media (max-width:880px){
     body{overflow:auto}
     main{flex-direction:column}
@@ -292,6 +299,22 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="app.js"></script>
+<footer id="credits">
+  <div>
+    <b>資料來源</b>　
+    <a href="https://opendata.cwa.gov.tw/" target="_blank" rel="noopener">交通部中央氣象署</a>
+    （氣象觀測站、雨量站、紫外線、雷達合成回波；
+    依<a href="https://data.gov.tw/license" target="_blank" rel="noopener">政府資料開放授權條款第 1 版</a>使用）　·　
+    <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>
+    （開闊地風場、逐時日射與濕度、逐時預報；CC BY 4.0）　·　
+    <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> 貢獻者（底圖與水道）
+  </div>
+  <div class="dis">
+    本站為個人製作的騎乘參考工具，非官方氣象資訊，不保證正確性與即時性；
+    颱風、豪雨等天氣警特報請以中央氣象署發布為準。所有建議僅供參考，
+    行車安全請自行判斷。
+  </div>
+</footer>
+<script type="module" src="app.js"></script>
 </body>
 </html>

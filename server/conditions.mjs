@@ -428,6 +428,12 @@ export async function getConditions({ full = false, overrides = null } = {}) {
     out.segments = segs.map((s, i) => ({
       i, km: +(s.s0 / 1000).toFixed(2), exposure: s.exposure,
       openWindMs: +field[i].speedMs.toFixed(2), openWindFromDeg: +field[i].fromDeg.toFixed(0),
+      // 未經曝露度折減的開闊地陣風起伏。前端若要自己跑方向分析，需要的是
+      // 這個原始值，而不是 cw/ccw 裡已經乘過 k 的版本。
+      openGustSigmaMs: +(field[i].gustSigmaMs ?? 0).toFixed(3),
+      // u/v 分量：前端自己跑方向分析時用這個，避免「風速+風向」四捨五入後
+      // 再用三角函數還原所累積的誤差（實測會造成 0.1 min 的前後端落差）
+      windU: +field[i].u.toFixed(4), windV: +field[i].v.toFixed(4),
       cw: analysis.directions.CW.perSeg[i], ccw: analysis.directions.CCW.perSeg[i],
       cwCalmS: calm.directions.CW.perSeg[i].timeS,
       ccwCalmS: calm.directions.CCW.perSeg[i].timeS,

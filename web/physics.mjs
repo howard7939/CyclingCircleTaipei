@@ -4,7 +4,10 @@
  * 刻意不讀檔、不碰 fs：這個模組要能原封不動地在瀏覽器裡跑。
  * 前端自己算方向分析，拉參數滑桿就不必往返伺服器；靜態部署
  * （GitHub Pages）也才可能 —— 那裡根本沒有後端可以算。
- * 讀設定檔的 loadParams() 留在 wind-model.mjs。
+ * 讀設定檔的 loadParams() 留在 server/wind-model.mjs。
+ *
+ * 檔案放在 web/ 而非 server/ 是刻意的：瀏覽器以靜態檔載入它，Node 以
+ * ../web/physics.mjs 匯入同一個檔。只有一份，不會有兩邊物理模型走偏的問題。
  *
  * 推導（完整說明見 docs/wind-model.md）：
  *   空氣阻力沿路線作功  W = ∫ ½ρ·CdA·|v_app|·(v + h) ds

@@ -1,0 +1,82 @@
+name: 產生氣象快照並部署到 Pages
+
+# 為什麼用 Actions 而不是讓瀏覽器直接打 API：
+#   1. 授權碼若放前端就等於公開，任何人都能拿去用到你的額度被停權。
+#      放在 repository secrets 裡，它永遠不會離開 Actions runner。
+#   2. CWA 的 historyapi 沒有 CORS 標頭，瀏覽器根本呼叫不到 ——
+#      而臨近預報（需要前一張雷達影格）與逐時雨量都依賴它。
+on:
+  schedule:
+    # 每 10 分鐘。注意 GitHub 的排程常有延遲（尖峰可能 10 分鐘以上），
+    # 所以頁面上會顯示觀測時間，使用者看得到資料有多舊。
+    - cron: '*/10 * * * *'
+  workflow_dispatch:        # 允許手動觸發，方便除錯
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'server/**'
+      - 'scripts/build-static.mjs'
+      - 'data/route.json'
+      - '.github/workflows/snapshot.yml'
+
+concurrency:
+  # 排程密集時避免兩個 run 互相覆蓋
+  group: snapshot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12        # 雷達 8.5 MB 偶爾很慢，但不該卡住整個 runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 產生快照
+        env:
+          CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
+        run: node scripts/build-static.mjs
+
+      - name: 確認快照不是半成品
+        # build-static.mjs 內部已有大聲失敗的檢查，這裡再擋一層：
+        # 寧可讓 Pages 保留上一份可用的快照，也不要部署壞掉的。
+        run: |
+          node -e "
+            const fs=require('fs');
+            const c=JSON.parse(fs.readFileSync('web/data/conditions.json','utf8'));
+            const r=JSON.parse(fs.readFileSync('web/data/route.min.json','utf8'));
+            const bad=[];
+            if(!c.wind?.openTerrain?.speedMs && c.wind?.openTerrain?.speedMs!==0) bad.push('缺風場');
+            if(!c.segments?.length) bad.push('缺逐段資料');
+            if(!r.segments?.length) bad.push('缺路線');
+            if(c.segments?.length !== r.segments?.length) bad.push('逐段數與路線不符');
+            const age=(Date.now()-new Date(c.generatedAt))/60000;
+            if(age>30) bad.push('快照時間異常（'+age.toFixed(0)+' 分鐘前）');
+            if(bad.length){ console.error('快照檢查失敗：'+bad.join('、')); process.exit(1); }
+            console.log('快照檢查通過：'+r.segments.length+' 段，'+
+              (fs.statSync('web/data/conditions.json').size/1024).toFixed(0)+' KB');
+          "
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

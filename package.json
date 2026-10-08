@@ -10,7 +10,11 @@
     "sections": "node scripts/apply-sections.mjs",
     "fetch:water": "node scripts/fetch-osm-water.mjs",
     "dev": "node --env-file=.env server/index.mjs",
-    "dev:server": "node --env-file=.env server/index.mjs"
+    "dev:server": "node --env-file=.env server/index.mjs",
+    "build:static": "node --env-file=.env scripts/build-static.mjs",
+    "preview:static": "node --env-file=.env scripts/build-static.mjs && node -e \"const h=require('node:http'),f=require('node:fs'),p=require('node:path');h.createServer((q,s)=>{let u=q.url.split('?')[0];if(u==='/')u='/index.html';const fp=p.join('web',u);f.readFile(fp,(e,b)=>{if(e){s.writeHead(404);return s.end('404')}s.writeHead(200,{'content-type':{'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.mjs':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8'}[p.extname(fp)]||'application/octet-stream'});s.end(b)})}).listen(8099,()=>console.log('靜態預覽 http://localhost:8099'))\""
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }
