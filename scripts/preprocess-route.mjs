@@ -75,16 +75,29 @@ function parseGpx(xml) {
     need(la && lo, '有 <trkpt> 缺少 lat/lon 屬性：' + b.slice(0, 120));
     const el = /<ele>([-\d.eE+]+)<\/ele>/.exec(b);
     const tm = /<time>([^<]+)<\/time>/.exec(b);
+    // Strava/Garmin 擴充欄位：實測功率是校正 CdA/Crr 的關鍵，別漏掉
+    const pw = /<gpxpx:PowerInWatts>([-\d.]+)<\/gpxpx:PowerInWatts>/.exec(b);
+    const hr = /<gpxtpx:hr>([-\d.]+)<\/gpxtpx:hr>/.exec(b);
+    const cd = /<gpxtpx:cad>([-\d.]+)<\/gpxtpx:cad>/.exec(b);
+    const at = /<gpxtpx:atemp>([-\d.]+)<\/gpxtpx:atemp>/.exec(b);
     pts.push({
       lat: +la[1],
       lon: +lo[1],
       ele: el ? +el[1] : null,
       t: tm ? Date.parse(tm[1]) : null,
+      powerW: pw ? +pw[1] : null,
+      hr: hr ? +hr[1] : null,
+      cad: cd ? +cd[1] : null,
+      atempC: at ? +at[1] : null,
     });
   }
 
   const nEle = pts.filter((p) => p.ele !== null).length;
   const nT = pts.filter((p) => Number.isFinite(p.t)).length;
+  const nPw = pts.filter((p) => p.powerW !== null).length;
+  const nHr = pts.filter((p) => p.hr !== null).length;
+  console.log('擴充欄位：功率 ' + nPw + '/' + pts.length + '，心率 ' + nHr + '/' + pts.length +
+              '，氣溫 ' + pts.filter((p) => p.atempC !== null).length + '/' + pts.length);
   need(nEle === pts.length,
     '高度資料不完整：' + nEle + '/' + pts.length + ' 個點有 <ele>。坡度分析需要全部有高度。');
   need(nT === pts.length,
@@ -189,6 +202,16 @@ for (let k = 0; k < nSeg; k++) {
     if (instV[i] !== null && instV[i] >= CFG.stopSpeedKmh / 3.6) vs.push(instV[i]);
   }
   const vMed = median(vs);
+
+  // 這段路內的實測功率/心率（只取移動中的點）
+  const pw = [], hr = [];
+  for (let i = a.idx; i <= b.idx && i < pts.length; i++) {
+    if (instV[i] === null || instV[i] < CFG.stopSpeedKmh / 3.6) continue;
+    if (pts[i].powerW !== null) pw.push(pts[i].powerW);
+    if (pts[i].hr !== null) hr.push(pts[i].hr);
+  }
+  const pMed = median(pw), hMed = median(hr);
+
   const eleMid = (a.ele + b.ele) / 2;
   const terrain = (Math.abs(gradePct) >= CFG.gradeMountainPct || eleMid >= CFG.eleMountainM)
     ? 'mountain' : 'lowland';
@@ -208,6 +231,8 @@ for (let k = 0; k < nSeg; k++) {
     terrain,
     exposure: terrain === 'mountain' ? 'mountain' : null, // lowland 待 step 2 區分河濱/市區
     obsSpeedKmh: vMed === null ? null : +(vMed * 3.6).toFixed(2),
+    obsPowerW: pMed === null ? null : Math.round(pMed),
+    obsHr: hMed === null ? null : Math.round(hMed),
   });
 }
 
@@ -316,6 +341,20 @@ for (const [label, test] of gradeBins) {
               (v === null ? '  n/a' : pad(v.toFixed(1), 5) + ' km/h'));
 }
 console.log('');
+const pwSegs = segments.filter((s) => s.obsPowerW !== null);
+if (pwSegs.length) {
+  const allP = pwSegs.map((s) => s.obsPowerW);
+  console.log('實測功率：' + pwSegs.length + '/' + segments.length + ' 段有資料   中位 ' +
+              median(allP).toFixed(0) + ' W   範圍 ' + Math.min(...allP) + '-' + Math.max(...allP) + ' W');
+  console.log('  依坡度：');
+  for (const [label, test] of gradeBins) {
+    const ss = pwSegs.filter((s) => test(s.gradePct));
+    if (!ss.length) continue;
+    console.log('    ' + label.padEnd(14) + pad(median(ss.map((s) => s.obsPowerW)).toFixed(0), 5) + ' W   中位速 ' +
+                pad(median(ss.map((s) => s.obsSpeedKmh)).toFixed(1), 5) + ' km/h');
+  }
+  console.log('');
+}
 console.log('地形分類：');
 for (const [k, t] of Object.entries(byTerrain)) {
   const v = median(t.speeds);

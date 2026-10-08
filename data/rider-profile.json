@@ -1,0 +1,28 @@
+{
+  "generatedAt": "2026-10-08T12:21:57.148Z",
+  "method": "區塊能量平衡回歸",
+  "source": "route.gpx 實測功率",
+  "rideDate": "2026-02-15T12:51:35.000Z",
+  "blocks": 197,
+  "massKg": 80,
+  "massNote": "外部給定，本資料無法辨識（與 CdA/Crr 共線）",
+  "cdaM2": 0.3984,
+  "crr": 0.00275,
+  "r2": 0.7168,
+  "rmseKJ": 0.85,
+  "calibRho": 1.2121,
+  "calibTempC": 18,
+  "fittedWind": {
+    "speedMs": 0.15,
+    "fromDeg": 0
+  },
+  "observedPowerW": {
+    "p25": 84,
+    "median": 97,
+    "p75": 110
+  },
+  "plausible": {
+    "cda": true,
+    "crr": true
+  }
+}
