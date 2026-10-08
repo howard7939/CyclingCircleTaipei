@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>環騎臺北 — 路段曝露度檢視</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='88'%3E%F0%9F%9A%B4%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  /* 色彩來源：dataviz 參考色盤 categorical slot 1/2/3。
+     已用 validate_palette.js --pairs all 驗證通過（最差 CVD ΔE 9.2）。
+     語意直覺的「綠=山區」被驗證器否決：綠↔橘在 protan 下 ΔE 僅 3.2。 */
+  :root {
+    --riverside: #2a78d6;
+    --urban:     #eb6834;
+    --mountain:  #1baf7a;
+
+    --surface:   #fcfcfb;
+    --plane:     #f9f9f7;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --ink-muted: #898781;
+    --grid:      #e1e0d9;
+    --baseline:  #c3c2b7;
+    --hair:      rgba(11,11,11,0.10);
+    --warning:   #fab219;
+    --critical:  #d03b3b;
+
+    --panel-w: 332px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink);
+    background: var(--plane);
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    flex: none; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--surface);
+    border-bottom: 1px solid var(--hair);
+  }
+  header h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
+  header .sub { color: var(--ink-muted); font-size: 12.5px; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  #panel {
+    flex: none; width: var(--panel-w); overflow-y: auto;
+    background: var(--surface); border-right: 1px solid var(--hair);
+    padding: 14px 16px 28px;
+  }
+  #map { flex: 1; min-width: 0; background: var(--grid); }
+
+  .sec { margin-bottom: 20px; }
+  .sec > h2 {
+    margin: 0 0 8px; font-size: 11.5px; font-weight: 650; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--ink-muted);
+  }
+
+  /* 圖例：色票 + 標籤 + 數值。identity 永不只靠顏色。 */
+  .legend { display: flex; flex-direction: column; gap: 1px; }
+  .legend-row {
+    display: grid; grid-template-columns: 14px 1fr auto auto; gap: 9px;
+    align-items: center; padding: 5px 6px; border-radius: 5px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .legend-row:hover { background: var(--plane); }
+  .legend-row[aria-pressed="false"] { opacity: .4; }
+  .legend-row .sw { width: 14px; height: 14px; border-radius: 3px; box-shadow: 0 0 0 1px var(--hair) inset; }
+  .legend-row .nm { font-weight: 500; }
+  .legend-row .km, .legend-row .pc {
+    font-variant-numeric: tabular-nums; color: var(--ink-2); font-size: 12.5px;
+  }
+  .legend-row .pc { color: var(--ink-muted); min-width: 42px; text-align: right; }
+
+  .modes { display: flex; gap: 0; border: 1px solid var(--hair); border-radius: 7px; overflow: hidden; }
+  .modes button {
+    flex: 1; padding: 7px 4px; font: inherit; font-size: 12.5px; cursor: pointer;
+    background: var(--surface); color: var(--ink-2); border: 0;
+    border-right: 1px solid var(--hair);
+  }
+  .modes button:last-child { border-right: 0; }
+  .modes button[aria-pressed="true"] { background: var(--ink); color: #fff; font-weight: 550; }
+
+  .toggles { display: flex; flex-direction: column; gap: 7px; }
+  .toggles label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+
+  .flags { display: flex; flex-direction: column; gap: 2px; }
+  .flag {
+    display: grid; grid-template-columns: 16px 1fr; gap: 8px; align-items: start;
+    padding: 6px 7px; border-radius: 5px; cursor: pointer; text-align: left;
+    font: inherit; font-size: 12.5px; background: none; border: 0; color: var(--ink);
+    border-left: 2px solid transparent;
+  }
+  .flag:hover { background: var(--plane); border-left-color: var(--baseline); }
+  .flag .ic { font-size: 13px; line-height: 1.35; }
+  .flag .tx { color: var(--ink-2); }
+  .flag .tx b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  table.tv { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.tv th, table.tv td { padding: 4px 5px; text-align: right; border-bottom: 1px solid var(--grid); }
+  table.tv th { color: var(--ink-muted); font-weight: 600; font-size: 11px; white-space: nowrap; }
+  table.tv td { font-variant-numeric: tabular-nums; }
+  table.tv td.l, table.tv th.l { text-align: left; }
+  table.tv tbody tr { cursor: pointer; }
+  table.tv tbody tr:hover { background: var(--plane); }
+
+  /* 高度剖面 */
+  #profile {
+    flex: none; background: var(--surface); border-top: 1px solid var(--hair);
+    padding: 8px 16px 6px; position: relative;
+  }
+  #profile svg { display: block; width: 100%; height: 146px; overflow: visible; }
+  #profile .ttl {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11.5px; color: var(--ink-muted); margin-bottom: 2px;
+  }
+  #readout { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  #readout b { color: var(--ink); }
+  .ax { font-size: 10.5px; fill: var(--ink-muted); font-variant-numeric: tabular-nums; }
+  .gl { stroke: var(--grid); stroke-width: 1; }
+  .bl { stroke: var(--baseline); stroke-width: 1; }
+  .runlab { font-size: 10.5px; font-weight: 600; }
+
+  .leaflet-container { font: inherit; }
+  .tip { font-size: 12.5px; line-height: 1.55; }
+  .tip .h { font-weight: 650; margin-bottom: 3px; }
+  .tip table { border-collapse: collapse; }
+  .tip td { padding: 1px 0; }
+  .tip td:first-child { color: var(--ink-muted); padding-right: 10px; }
+  .tip td:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+
+  #err {
+    margin: 16px; padding: 14px 16px; border-radius: 8px;
+    background: #fdf2f2; border: 1px solid var(--critical); color: #7a1d1d;
+    white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+  }
+
+  @media (max-width: 860px) {
+    main { flex-direction: column; }
+    #panel { width: auto; border-right: 0; border-bottom: 1px solid var(--hair); max-height: 46vh; }
+    #map { min-height: 42vh; }
+    #profile svg { height: 118px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>環騎臺北 · 路段曝露度檢視</h1>
+  <span class="sub" id="hdr">載入中…</span>
+</header>
+
+<main>
+  <div id="panel">
+    <div class="sec">
+      <h2>著色依據</h2>
+      <div class="modes" id="modes">
+        <button data-mode="exposure" aria-pressed="true">曝露度</button>
+        <button data-mode="grade" aria-pressed="false">坡度</button>
+        <button data-mode="water" aria-pressed="false">離水距離</button>
+      </div>
+    </div>
+
+    <div class="sec">
+      <h2 id="legTitle">圖例</h2>
+      <div class="legend" id="legend"></div>
+    </div>
+
+    <div class="sec">
+      <h2>圖層</h2>
+      <div class="toggles">
+        <label><input type="checkbox" id="tWater" checked> OSM 水岸折線（分類依據）</label>
+        <label><input type="checkbox" id="tRamp" checked> 標示 8 段跨堤引道</label>
+        <label><input type="checkbox" id="tTable"> 表格檢視</label>
+      </div>
+    </div>
+
+    <div class="sec" id="secFlags">
+      <h2>需人眼確認的路段</h2>
+      <div class="flags" id="flags"></div>
+    </div>
+
+    <div class="sec" id="secTable" hidden>
+      <h2>連續區段表</h2>
+      <table class="tv" id="tbl"></table>
+    </div>
+  </div>
+
+  <div id="map"></div>
+</main>
+
+<div id="profile">
+  <div class="ttl">
+    <span>高度剖面 + 沿路線分類色帶</span>
+    <span id="readout">游標移到剖面或地圖上的路段</span>
+  </div>
+  <svg id="svg" preserveAspectRatio="none"></svg>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(async function () {
+  'use strict';
+
+  const EXP = {
+    riverside: { name: '河濱', color: '#2a78d6', note: '上風無建物，風程長 → 風影響最大' },
+    urban:     { name: '市區', color: '#eb6834', note: '建物遮蔽，粗糙長度大 → 風影響中等' },
+    mountain:  { name: '山區', color: '#1baf7a', note: '地形遮蔽，功率以重力為主 → 風影響最小' },
+  };
+
+  // 坡度：雙極（上坡/下坡有極性）。藍↔紅 + 中性灰中點，每臂 3 步，明度單調。
+  const GRADE_BINS = [
+    { max: -6,       color: '#184f95', label: '≤ −6%' },
+    { max: -3,       color: '#2a78d6', label: '−6 ~ −3%' },
+    { max: -1,       color: '#86b6ef', label: '−3 ~ −1%' },
+    { max:  1,       color: '#c3c2b7', label: '平路 ±1%' },
+    { max:  3,       color: '#f0a0a0', label: '1 ~ 3%' },
+    { max:  6,       color: '#e34948', label: '3 ~ 6%' },
+    { max: Infinity, color: '#a32a2a', label: '> 6%' },
+  ];
+
+  // 離水距離：序列（單一藍色調，淺→深代表近→遠）
+  const WATER_BINS = [
+    { max: 50,       color: '#b7d3f6', label: '< 50 m' },
+    { max: 150,      color: '#86b6ef', label: '50 ~ 150 m' },
+    { max: 250,      color: '#3987e5', label: '150 ~ 250 m（門檻）' },
+    { max: 600,      color: '#256abf', label: '250 ~ 600 m' },
+    { max: 2000,     color: '#184f95', label: '600 m ~ 2 km' },
+    { max: Infinity, color: '#0d366b', label: '> 2 km' },
+  ];
+
+  const $ = (id) => document.getElementById(id);
+  const fail = (msg) => {
+    document.querySelector('main').remove();
+    $('profile').remove();
+    const d = document.createElement('div');
+    d.id = 'err';
+    d.textContent = msg;
+    document.body.appendChild(d);
+    throw new Error(msg);
+  };
+
+  // ---------- 載入 ----------
+  async function getJson(url, what) {
+    let r;
+    try { r = await fetch(url); }
+    catch (e) { fail('無法連線到 ' + url + '\n' + e.message + '\n\n伺服器有在跑嗎？ npm run dev:server'); }
+    if (!r.ok) {
+      let extra = '';
+      try { extra = '\n' + JSON.stringify(await r.json(), null, 2); } catch {}
+      fail(what + ' 載入失敗：HTTP ' + r.status + ' ' + url + extra);
+    }
+    return r.json();
+  }
+
+  const route = await getJson('/data/route.json', '路線資料');
+  const water = await getJson('/data/osm-water.json', '水域資料');
+
+  const segs = route.segments || [];
+  if (segs.length < 100) fail('route.json 的 segments 只有 ' + segs.length + ' 段，資料異常。\n請重跑 npm run preprocess');
+  if (segs.some((s) => s.exposure == null)) {
+    const n = segs.filter((s) => s.exposure == null).length;
+    fail(n + ' 段的 exposure 是 null，曝露度分類未完成。\n請執行 node scripts/classify-exposure.mjs');
+  }
+
+  const M = route.meta;
+  $('hdr').textContent = M.totalKm.toFixed(2) + ' km · ' + segs.length + ' 段 × ' +
+    M.segmentLenM.toFixed(0) + ' m · 爬升 ' + M.elevGainM + ' m · GPX 記錄方向 ' +
+    (M.gpxOrientation === 'CCW' ? '逆時針' : '順時針');
+
+  // ---------- 連續區段 ----------
+  const runs = [];
+  for (const s of segs) {
+    const last = runs[runs.length - 1];
+    if (last && last.exposure === s.exposure) { last.endKm = s.s1 / 1000; last.segs.push(s); }
+    else runs.push({ exposure: s.exposure, startKm: s.s0 / 1000, endKm: s.s1 / 1000, segs: [s] });
+  }
+  const med = (xs) => { const a = xs.filter((x) => x != null).sort((p, q) => p - q); return a.length ? a[a.length >> 1] : null; };
+  for (const r of runs) {
+    r.km = r.endKm - r.startKm;
+    r.medWater = med(r.segs.map((s) => s.distWaterM));
+    r.medSpeed = med(r.segs.map((s) => s.obsSpeedKmh));
+    r.eleMin = Math.min(...r.segs.map((s) => s.ele));
+    r.eleMax = Math.max(...r.segs.map((s) => s.ele));
+  }
+
+  const totals = {};
+  for (const s of segs) {
+    const t = (totals[s.exposure] ||= { km: 0, n: 0 });
+    t.km += s.len / 1000; t.n++;
+  }
+
+  // ---------- 地圖 ----------
+  const map = L.map('map', { preferCanvas: false, zoomControl: true });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
+  }).addTo(map);
+  map.fitBounds([[M.bbox.minLat, M.bbox.minLon], [M.bbox.maxLat, M.bbox.maxLon]], { padding: [24, 24] });
+
+  // 水岸折線（分類的實際依據，畫出來才能驗證為什麼某段被判成某類）
+  const waterLayer = L.layerGroup();
+  for (const e of water.edges) {
+    if (e.spanM < 2000) continue; // 與 classify-exposure 的 majorRiverSpanM 一致
+    L.polyline(e.pts, { color: '#7fb3e8', weight: 1.2, opacity: .85, interactive: false }).addTo(waterLayer);
+  }
+  waterLayer.addTo(map);
+
+  // 白色外框（製圖學慣例：保證線條與底圖分離，也補足水綠 2.74:1 的對比不足）
+  const casing = L.layerGroup();
+  for (const r of runs) {
+    L.polyline(r.segs.map((s) => s.a).concat([r.segs[r.segs.length - 1].b]),
+      { color: '#ffffff', weight: 7, opacity: .95, lineCap: 'round', interactive: false }).addTo(casing);
+  }
+  casing.addTo(map);
+
+  let mode = 'exposure';
+  const colorOf = (s) => {
+    if (mode === 'exposure') return EXP[s.exposure].color;
+    if (mode === 'grade') return GRADE_BINS.find((b) => s.gradePct <= b.max).color;
+    return WATER_BINS.find((b) => s.distWaterM <= b.max).color;
+  };
+
+  const hidden = new Set();
+  const visible = (s) => !(mode === 'exposure' && hidden.has(s.exposure));
+
+  const segLayer = L.layerGroup().addTo(map);
+  const lines = segs.map((s) => {
+    const pl = L.polyline([s.a, s.b], {
+      color: colorOf(s), weight: 4, opacity: 1, lineCap: 'butt',
+      bubblingMouseEvents: false,
+    });
+    pl.on('mouseover', () => { showSeg(s); pl.setStyle({ weight: 7 }); });
+    pl.on('mouseout', () => { pl.setStyle({ weight: 4 }); clearCursor(); });
+    pl.on('click', () => L.popup({ maxWidth: 300 })
+      .setLatLng([s.lat, s.lon]).setContent(tipHtml(s)).openOn(map));
+    pl.addTo(segLayer);
+    return pl;
+  });
+
+  // 跨堤引道標示
+  const rampLayer = L.layerGroup().addTo(map);
+  const ramps = segs.filter((s) => s.rampOverLevee);
+  for (const s of ramps) {
+    L.circleMarker([s.lat, s.lon], {
+      radius: 6, color: '#ffffff', weight: 2, fillColor: '#fab219', fillOpacity: 1,
+    }).addTo(rampLayer).on('click', () => L.popup({ maxWidth: 300 })
+      .setLatLng([s.lat, s.lon]).setContent(tipHtml(s)).openOn(map));
+  }
+
+  const cursor = L.circleMarker([0, 0], {
+    radius: 7, color: '#0b0b0b', weight: 2.5, fillColor: '#ffffff', fillOpacity: 1,
+  });
+
+  function tipHtml(s) {
+    const e = EXP[s.exposure];
+    const rows = [
+      ['曝露度', e.name + (s.rampOverLevee ? '（跨堤引道）' : '') + (s.exposureFilled ? '（形態學補）' : '')],
+      ['里程', (s.s0 / 1000).toFixed(2) + ' – ' + (s.s1 / 1000).toFixed(2) + ' km'],
+      ['行進方位', s.bearing.toFixed(0) + '°'],
+      ['坡度', s.gradePct.toFixed(2) + ' %'],
+      ['高度', s.ele.toFixed(1) + ' m'],
+      ['離主要水岸', s.distWaterM + ' m' + (s.nearWater ? '（' + s.nearWater + '）' : '')],
+      ['實測速度', s.obsSpeedKmh == null ? '—' : s.obsSpeedKmh.toFixed(1) + ' km/h'],
+      ['最近河道走向', s.channelAxisDeg == null ? '—' : s.channelAxisDeg.toFixed(0) + '° 軸向' +
+        (s.channelName ? '（' + s.channelName + '）' : '')],
+    ];
+    return '<div class="tip"><div class="h">第 ' + s.i + ' 段 · ' + e.name + '</div><table>' +
+      rows.map((r) => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('') +
+      '</table></div>';
+  }
+
+  function showSeg(s) {
+    $('readout').innerHTML =
+      'km <b>' + (s.s0 / 1000).toFixed(2) + '</b> · ' + EXP[s.exposure].name +
+      ' · 高度 <b>' + s.ele.toFixed(1) + '</b> m · 坡度 <b>' + s.gradePct.toFixed(2) + '</b>% ' +
+      '· 離水 <b>' + s.distWaterM + '</b> m · 方位 <b>' + s.bearing.toFixed(0) + '</b>°';
+    moveCur(s);
+  }
+  function moveCur(s) { cursor.setLatLng([s.lat, s.lon]); if (!map.hasLayer(cursor)) cursor.addTo(map); setProfCursor(s); }
+  function clearCursor() { if (map.hasLayer(cursor)) map.removeLayer(cursor); setProfCursor(null); }
+
+  // ---------- 著色模式 ----------
+  function restyle() {
+    segs.forEach((s, i) => {
+      // 用加入/移除圖層而非 opacity 0 來隱藏：透明線條仍會攔截滑鼠事件，
+      // 會造成「隱藏的類別還能被 hover」的困惑。
+      const vis = visible(s);
+      const on = segLayer.hasLayer(lines[i]);
+      if (vis && !on) segLayer.addLayer(lines[i]);
+      else if (!vis && on) segLayer.removeLayer(lines[i]);
+      if (vis) lines[i].setStyle({ color: colorOf(s), weight: 4 });
+    });
+    renderLegend();
+    renderProfile();
+  }
+
+  $('modes').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-mode]');
+    if (!b) return;
+    mode = b.dataset.mode;
+    for (const btn of $('modes').children) btn.setAttribute('aria-pressed', String(btn === b));
+    $('legTitle').textContent = { exposure: '圖例 · 曝露度', grade: '圖例 · 坡度（雙極）', water: '圖例 · 離水距離（序列）' }[mode];
+    restyle();
+  });
+
+  function renderLegend() {
+    const L2 = $('legend');
+    L2.innerHTML = '';
+    if (mode === 'exposure') {
+      for (const [k, e] of Object.entries(EXP)) {
+        const t = totals[k] || { km: 0, n: 0 };
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        row.setAttribute('aria-pressed', String(!hidden.has(k)));
+        row.title = e.note + '（點擊可隱藏/顯示）';
+        row.innerHTML = '<span class="sw" style="background:' + e.color + '"></span>' +
+          '<span class="nm">' + e.name + '</span>' +
+          '<span class="km">' + t.km.toFixed(1) + ' km</span>' +
+          '<span class="pc">' + (100 * t.km / M.totalKm).toFixed(1) + '%</span>';
+        row.onclick = () => { hidden.has(k) ? hidden.delete(k) : hidden.add(k); restyle(); };
+        L2.appendChild(row);
+      }
+      return;
+    }
+    const bins = mode === 'grade' ? GRADE_BINS : WATER_BINS;
+    const val = mode === 'grade' ? ((s) => s.gradePct) : ((s) => s.distWaterM);
+    let prev = -Infinity;
+    for (const b of bins) {
+      const inBin = segs.filter((s) => val(s) > prev && val(s) <= b.max);
+      prev = b.max;
+      const km = inBin.reduce((a, s) => a + s.len / 1000, 0);
+      const row = document.createElement('div');
+      row.className = 'legend-row';
+      row.style.cursor = 'default';
+      row.innerHTML = '<span class="sw" style="background:' + b.color + '"></span>' +
+        '<span class="nm">' + b.label + '</span>' +
+        '<span class="km">' + km.toFixed(1) + ' km</span>' +
+        '<span class="pc">' + (100 * km / M.totalKm).toFixed(1) + '%</span>';
+      L2.appendChild(row);
+    }
+  }
+
+  // ---------- 需人眼確認的路段 ----------
+  function renderFlags() {
+    const host = $('flags');
+    host.innerHTML = '';
+    const items = [];
+
+    for (const s of ramps) {
+      items.push({
+        ic: '◆', seg: s,
+        tx: 'km <b>' + (s.s0 / 1000).toFixed(1) + '</b> 跨堤引道 — 坡度 <b>' + s.gradePct.toFixed(1) +
+            '</b>%、離水僅 <b>' + s.distWaterM + '</b> m、高度 <b>' + s.ele.toFixed(0) +
+            '</b> m。原判山區，已改判河濱。',
+      });
+    }
+    for (const r of runs) {
+      if (r.km >= 0.5) continue;
+      items.push({
+        ic: '▲', seg: r.segs[0],
+        tx: 'km <b>' + r.startKm.toFixed(1) + '–' + r.endKm.toFixed(1) + '</b> 僅 <b>' +
+            r.km.toFixed(1) + '</b> km 的孤立「' + EXP[r.exposure].name + '」段，中位離水 <b>' +
+            r.medWater + '</b> m。',
+      });
+    }
+
+    if (!items.length) { host.innerHTML = '<div class="flag"><span class="ic">✓</span><span class="tx">沒有可疑路段。</span></div>'; return; }
+    for (const it of items) {
+      const b = document.createElement('button');
+      b.className = 'flag';
+      b.innerHTML = '<span class="ic">' + it.ic + '</span><span class="tx">' + it.tx + '</span>';
+      b.onclick = () => { map.flyTo([it.seg.lat, it.seg.lon], 16, { duration: .7 }); showSeg(it.seg); };
+      host.appendChild(b);
+    }
+  }
+
+  // ---------- 表格檢視（補足水綠對比不足的 relief 要求） ----------
+  function renderTable() {
+    const head = '<thead><tr><th class="l">里程 (km)</th><th class="l">曝露度</th>' +
+      '<th>長度</th><th>中位離水</th><th>高度</th><th>中位速</th></tr></thead>';
+    const body = runs.map((r, i) =>
+      '<tr data-i="' + i + '"><td class="l">' + r.startKm.toFixed(1) + '–' + r.endKm.toFixed(1) + '</td>' +
+      '<td class="l"><span class="sw" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' +
+      EXP[r.exposure].color + ';margin-right:5px"></span>' + EXP[r.exposure].name + '</td>' +
+      '<td>' + r.km.toFixed(1) + '</td><td>' + r.medWater + ' m</td>' +
+      '<td>' + r.eleMin.toFixed(0) + '–' + r.eleMax.toFixed(0) + '</td>' +
+      '<td>' + (r.medSpeed == null ? '—' : r.medSpeed.toFixed(1)) + '</td></tr>').join('');
+    const t = $('tbl');
+    t.innerHTML = head + '<tbody>' + body + '</tbody>';
+    t.querySelectorAll('tbody tr').forEach((tr) => {
+      tr.onclick = () => {
+        const r = runs[+tr.dataset.i];
+        map.fitBounds(L.latLngBounds(r.segs.map((s) => s.a)), { padding: [40, 40] });
+        showSeg(r.segs[0]);
+      };
+    });
+  }
+
+  // ---------- 高度剖面 ----------
+  const svg = $('svg');
+  let pGeom = null;
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+  const STRIP_H = 11;  // 沿路線的分類色帶高度
+  const STRIP_GAP = 5; // 色帶與高度面積圖之間的間隙
+
+  function renderProfile() {
+    const W = svg.clientWidth || svg.parentElement.clientWidth || 900;
+    const H = svg.clientHeight || 124;
+    const P = { t: 8, r: 8, b: 18, l: 32 };
+    const iw = Math.max(10, W - P.l - P.r);
+    // 高度區與分類色帶分層：河濱高度只有 1~15 m，若與 175 m 的山區共用一個
+    // y 軸，佔 76% 路程的河濱會被壓成貼底的一條細線，完全無法用來驗證分類。
+    // 因此分類另闢一條固定高度的色帶，不受高度比例影響。
+    const stripY = P.t + Math.max(10, H - P.t - P.b - STRIP_H - STRIP_GAP) + STRIP_GAP;
+    const ih = Math.max(10, stripY - STRIP_GAP - P.t);
+    const kmMax = M.totalKm;
+
+    // 刻度取整：從候選步長中挑出讓格線數落在 3~5 條的那一個
+    const rawMax = Math.max(...segs.map((s) => s.ele));
+    const stepE = [10, 20, 25, 50, 100].find((v) => rawMax / v <= 5) || 100;
+    const eMax = Math.ceil(rawMax / stepE) * stepE;
+
+    const x = (km) => P.l + (km / kmMax) * iw;
+    const y = (e) => P.t + ih - (e / eMax) * ih;
+    pGeom = { x, y, P, ih, kmMax, W, H, stripY };
+
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    for (let e = 0; e <= eMax; e += stepE) {
+      svg.appendChild(mk('line', { class: 'gl', x1: P.l, x2: P.l + iw, y1: y(e), y2: y(e) }));
+      svg.appendChild(mk('text', { class: 'ax', x: P.l - 5, y: y(e) + 3.5, 'text-anchor': 'end' })).textContent = e;
+    }
+    for (let km = 0; km <= kmMax; km += 10) {
+      svg.appendChild(mk('text', { class: 'ax', x: x(km), y: H - 5, 'text-anchor': 'middle' })).textContent = km;
+    }
+    svg.appendChild(mk('line', { class: 'bl', x1: P.l, x2: P.l + iw, y1: y(0), y2: y(0) }));
+
+    // 高度：每個連續區段一個面積路徑，2px 表面間隙（相鄰填色不相黏）
+    for (const r of runs) {
+      const pts = r.segs.map((s) => [x((s.s0 / 1000 + s.s1 / 1000) / 2), y(s.ele)]);
+      if (!pts.length) continue;
+      const d = 'M' + x(r.startKm) + ',' + y(0) + 'L' + pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') +
+                'L' + x(r.endKm) + ',' + y(0) + 'Z';
+      const col = mode === 'exposure' ? EXP[r.exposure].color : '#c3c2b7';
+      svg.appendChild(mk('path', { d, fill: col, 'fill-opacity': mode === 'exposure' ? .9 : .45, stroke: '#fcfcfb', 'stroke-width': 2 }));
+    }
+
+    // 沿路線的色帶：曝露度模式畫連續區段（可直接標字），其餘模式逐段上色
+    if (mode === 'exposure') {
+      for (const r of runs) {
+        const x0 = x(r.startKm), x1 = x(r.endKm);
+        svg.appendChild(mk('rect', {
+          x: x0 + 1, y: stripY, width: Math.max(1, x1 - x0 - 2), height: STRIP_H, rx: 2,
+          fill: EXP[r.exposure].color,
+        }));
+        if (x1 - x0 >= 34) {
+          const t = mk('text', {
+            class: 'runlab', x: (x0 + x1) / 2, y: stripY + STRIP_H - 2.5,
+            'text-anchor': 'middle', fill: '#ffffff',
+          });
+          t.textContent = EXP[r.exposure].name;
+          svg.appendChild(t);
+        }
+      }
+    } else {
+      for (const s of segs) {
+        svg.appendChild(mk('rect', {
+          x: x(s.s0 / 1000), y: stripY, width: Math.max(1, x(s.s1 / 1000) - x(s.s0 / 1000)) + .4,
+          height: STRIP_H, fill: colorOf(s),
+        }));
+      }
+    }
+
+    // 跨堤引道在色帶上方打點，便於在剖面上定位
+    for (const s of ramps) {
+      svg.appendChild(mk('circle', {
+        cx: x((s.s0 / 1000 + s.s1 / 1000) / 2), cy: stripY - 3.5, r: 2.6,
+        fill: '#fab219', stroke: '#fcfcfb', 'stroke-width': 1,
+      }));
+    }
+
+    pGeom.cur = mk('line', { class: 'bl', y1: P.t, y2: stripY + STRIP_H, stroke: '#0b0b0b', 'stroke-width': 1.5, opacity: 0 });
+    svg.appendChild(pGeom.cur);
+  }
+
+  function setProfCursor(s) {
+    if (!pGeom || !pGeom.cur) return;
+    if (!s) { pGeom.cur.setAttribute('opacity', 0); return; }
+    const px = pGeom.x((s.s0 / 1000 + s.s1 / 1000) / 2);
+    pGeom.cur.setAttribute('x1', px);
+    pGeom.cur.setAttribute('x2', px);
+    pGeom.cur.setAttribute('opacity', 1);
+  }
+
+  svg.addEventListener('mousemove', (ev) => {
+    if (!pGeom) return;
+    const r = svg.getBoundingClientRect();
+    const km = ((ev.clientX - r.left) / r.width * pGeom.W - pGeom.P.l) / (pGeom.W - pGeom.P.l - pGeom.P.r) * pGeom.kmMax;
+    const i = Math.max(0, Math.min(segs.length - 1, Math.round(km * 1000 / M.segmentLenM)));
+    showSeg(segs[i]);
+  });
+  svg.addEventListener('mouseleave', clearCursor);
+
+  // ---------- 圖層開關 ----------
+  $('tWater').onchange = (e) => e.target.checked ? waterLayer.addTo(map) : map.removeLayer(waterLayer);
+  $('tRamp').onchange = (e) => e.target.checked ? rampLayer.addTo(map) : map.removeLayer(rampLayer);
+  $('tTable').onchange = (e) => { $('secTable').hidden = !e.target.checked; if (e.target.checked) renderTable(); };
+
+  let rt;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderProfile, 120); });
+
+  renderLegend();
+  renderFlags();
+  renderProfile();
+  console.log('[環騎臺北] ' + segs.length + ' 段已載入；曝露度 ' +
+    Object.entries(totals).map(([k, v]) => EXP[k].name + ' ' + v.km.toFixed(1) + ' km').join('、'));
+})();
+</script>
+</body>
+</html>
