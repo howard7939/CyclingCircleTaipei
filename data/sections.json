@@ -1,8 +1,12 @@
 {
   "_comment": [
-    "環騎臺北路線的實地路段分類（權威來源，由騎乘者提供）。",
-    "這份檔案可以手動編輯：改動後重跑 node scripts/apply-sections.mjs 即可。",
-    "km 以 GPX 軌跡的累積距離為準（全長 65.72 km）。",
+    "環騎臺北路線的起終點與實地路段分類（權威來源，由騎乘者提供）。",
+    "可以手動編輯：改動後重跑 npm run build:data 即可。",
+    "",
+    "startAtKm 以「原始 GPX 的里程」指定新的起終點，前處理會據此旋轉路線。",
+    "旋轉之後，下面的 waypoints 與 sections 一律使用【旋轉後】的里程，",
+    "也就是以新起點為 0 的里程系統。",
+    "",
     "exposure 的物理意義是風程/遮蔽程度：",
     "  riverside 河濱 floodplain，上風無建物，風程長 -> 風影響最大",
     "  urban     市區街廓，建物遮蔽、粗糙長度大 -> 風影響中等",
@@ -11,21 +15,28 @@
   "source": "騎乘者實地分類",
   "providedAt": "2026-10-08",
   "totalKm": 65.72,
+
+  "startAtKm": 2.90,
+  "startName": "社子島島頭公園",
+  "_startNote": "原始 GPX 里程 2.90 km 處（25.10944, 121.46641），社子島最西端迴轉處。原起點社子大橋旋轉後落在 km 62.82。",
+
   "waypoints": [
-    { "km": 0.0,   "name": "社子大橋", "role": "起點" },
-    { "km": 32.85,  "name": "景美溪右岸自行車道終點（木柵）" },
-    { "km": 33.55,  "name": "福德坑爬坡起點" },
-    { "km": 37.8,  "name": "至高點" },
-    { "km": 42.1,  "name": "中華科大" },
-    { "km": 46.05,  "name": "基隆河左岸自行車道終點（南港）" },
-    { "km": 65.72, "name": "社子大橋", "role": "終點" }
+    { "km": 0.0,   "name": "社子島島頭公園", "role": "起點" },
+    { "km": 29.95, "name": "景美溪右岸自行車道終點（木柵）" },
+    { "km": 30.65, "name": "福德坑爬坡起點" },
+    { "km": 34.90, "name": "至高點" },
+    { "km": 39.20, "name": "中華科大" },
+    { "km": 43.15, "name": "基隆河左岸自行車道終點（南港）" },
+    { "km": 62.82, "name": "社子大橋" },
+    { "km": 65.72, "name": "社子島島頭公園", "role": "終點" }
   ],
+
   "sections": [
-    { "fromKm": 0.0,   "toKm": 32.85,  "exposure": "riverside", "label": "河濱自行車道（淡水河→新店溪→景美溪）" },
-    { "fromKm": 32.85,  "toKm": 33.55,  "exposure": "urban",     "label": "市區道路（木柵→福德坑）" },
-    { "fromKm": 33.55,  "toKm": 37.8,  "exposure": "mountain",  "label": "山區上坡（福德坑→至高點）", "phase": "climb" },
-    { "fromKm": 37.8,  "toKm": 42.1,  "exposure": "mountain",  "label": "山區下坡（至高點→中華科大）", "phase": "descent" },
-    { "fromKm": 42.1,  "toKm": 46.05,  "exposure": "urban",     "label": "市區道路（中華科大→南港）" },
-    { "fromKm": 46.05,  "toKm": 65.72, "exposure": "riverside", "label": "河濱自行車道（基隆河左岸）" }
+    { "fromKm": 0.0,   "toKm": 29.95, "exposure": "riverside", "label": "河濱自行車道（淡水河→新店溪→景美溪）" },
+    { "fromKm": 29.95, "toKm": 30.65, "exposure": "urban",     "label": "市區道路（木柵→福德坑）" },
+    { "fromKm": 30.65, "toKm": 34.90, "exposure": "mountain",  "label": "山區上坡（福德坑→至高點）", "phase": "climb" },
+    { "fromKm": 34.90, "toKm": 39.20, "exposure": "mountain",  "label": "山區下坡（至高點→中華科大）", "phase": "descent" },
+    { "fromKm": 39.20, "toKm": 43.15, "exposure": "urban",     "label": "市區道路（中華科大→南港）" },
+    { "fromKm": 43.15, "toKm": 65.72, "exposure": "riverside", "label": "河濱自行車道（基隆河左岸→社子大橋→島頭）" }
   ]
 }

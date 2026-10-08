@@ -49,7 +49,19 @@
   .vd-cell{background:var(--plane);border-radius:7px;padding:7px 9px}
   .vd-cell .k{font-size:11px;color:var(--ink-muted)}
   .vd-cell .v{font-size:15px;font-weight:620;font-variant-numeric:tabular-nums}
+  .vd-cell{font:inherit;text-align:left;border:0;cursor:pointer;width:100%}
+  .vd-cell:hover{background:#eceae4}
   .vd-cell.win{box-shadow:inset 0 0 0 1.5px var(--good)}
+  .vd-cell .tag{display:none;font-size:10px;font-weight:600;color:#fff;background:var(--ink);
+                border-radius:99px;padding:1px 6px;vertical-align:1px}
+  .vd-cell.viewing .tag{display:inline-block}
+  .vd-cell.viewing{outline:2px solid var(--ink);outline-offset:-2px}
+  .vd-hint{margin-top:7px;font-size:11px;color:var(--ink-muted)}
+  .help{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;
+        border-radius:99px;border:1px solid var(--baseline);color:var(--ink-muted);
+        font-size:10px;cursor:help;margin-left:5px;vertical-align:1px}
+  .note{font-size:11.5px;color:var(--ink-muted);line-height:1.55;margin-top:8px}
+  .note b{color:var(--ink-2);font-weight:600}
 
   .modes{display:flex;border:1px solid var(--hair);border-radius:7px;overflow:hidden;flex-wrap:wrap}
   .modes button{flex:1 1 44%;padding:7px 4px;font:inherit;font-size:12px;cursor:pointer;
@@ -138,9 +150,12 @@
         <span class="vd-gain" id="vdGain"></span>
       </div>
       <div class="vd-sub" id="vdSub"></div>
+      <div class="vd-hint">點下面任一欄，可切換地圖上檢視的騎乘方向</div>
       <div class="vd-split">
-        <div class="vd-cell" id="cellCW"><div class="k">順時針</div><div class="v" id="vCW">—</div></div>
-        <div class="vd-cell" id="cellCCW"><div class="k">逆時針</div><div class="v" id="vCCW">—</div></div>
+        <button class="vd-cell" id="cellCW" data-dir="windCW">
+          <div class="k">順時針 <span class="tag">檢視</span></div><div class="v" id="vCW">—</div></button>
+        <button class="vd-cell" id="cellCCW" data-dir="windCCW">
+          <div class="k">逆時針 <span class="tag">檢視</span></div><div class="v" id="vCCW">—</div></button>
       </div>
     </div>
 
@@ -198,6 +213,7 @@
 
     <div class="sec">
       <h2>風向與臨界方位</h2>
+      <div class="note" id="windHelp"></div>
       <svg id="compass" viewBox="0 0 220 220" style="width:100%;max-width:230px;display:block;margin:0 auto"></svg>
       <dl class="kv" id="windKv" style="margin-top:10px"></dl>
     </div>
@@ -206,6 +222,7 @@
       <h2>圖層</h2>
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer">
         <input type="checkbox" id="tArrows" checked> 風向箭頭</label>
+      <div class="note" id="arrowHelp"></div>
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;margin-top:6px">
         <input type="checkbox" id="tStations"> 氣象測站</label>
       <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;margin-top:6px">

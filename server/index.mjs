@@ -148,6 +148,17 @@ async function getConditions({ full = false, overrides = null } = {}) {
                           +Math.max(...field.map((f) => f.speedMs)).toFixed(2)],
       obsTime: obs.stations[0]?.obsTime ?? null,
       modelTime: om.points[0]?.current?.time ?? null,
+      // 風場的實際來源：沿路線等距取 SAMPLE_N 個點查 Open-Meteo，
+      // 再以 IDW(power=2) 內插到每個路段。模式格點約 8 km，所以多個取樣點
+      // 常落在同一格 —— gridCells 就是實際的獨立風場分區數。
+      sampleCount: om.points.length,
+      gridCells: new Set(om.points.map((p) => p.gridLat + ',' + p.gridLon)).size,
+      samples: om.points.map((p) => ({
+        name: p.name, lat: p.reqLat, lon: p.reqLon,
+        gridLat: p.gridLat, gridLon: p.gridLon, gridElevM: p.gridElevM,
+        windMs: p.current.windMs, fromDeg: p.current.windFromDeg, gustMs: p.current.gustMs,
+      })),
+      interpolation: { method: 'IDW', power: 2, note: 'u,v 分量各自內插；絕不內插角度' },
     },
     direction: {
       // 定功率下總能量 = P x T，所以「時間」就是最自然的比較量綱
@@ -193,6 +204,8 @@ async function getConditions({ full = false, overrides = null } = {}) {
   };
 
   if (full) {
+    // 2630 段對瀏覽器繪圖太多，給前端一個建議的抽樣步長（計算仍用全解析度）
+    out.displayStride = Math.max(1, Math.round(segs.length / 700));
     out.segments = segs.map((s, i) => ({
       i, km: +(s.s0 / 1000).toFixed(2), exposure: s.exposure,
       openWindMs: +field[i].speedMs.toFixed(2), openWindFromDeg: +field[i].fromDeg.toFixed(0),

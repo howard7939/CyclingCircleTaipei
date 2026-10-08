@@ -7,7 +7,7 @@
  *
  * 設計紀律：任何解析不到預期資料的情況都直接 exit 1，不要靜默產出半成品。
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,7 +16,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CFG = {
   gpx: resolve(ROOT, 'route.gpx'),
   out: resolve(ROOT, 'data/route.json'),
-  resampleM: 100,        // 路段長度
+  // 路段長度。100 m 時路線在段內就彎了，弦長比弧長短 1.9%，閉環殘差 210 m，
+  // 會產生約 45 s 的虛假方向偏好（佔訊號 16%）。25 m 時缺口降到 0.34%、
+  // 殘差 12 m（約 2.6 s，佔訊號 1%）。
+  resampleM: 25,
   eleSmoothM: 150,       // 高度平滑視窗（GPS/氣壓高度雜訊很大）
   gradeMountainPct: 1.5, // 判為山區的坡度門檻
   eleMountainM: 25,      // 判為山區的高度門檻
@@ -190,11 +193,14 @@ const step = totalM / nSeg; // 均分，讓最後一段不會是殘段
 const nodes = [];
 for (let k = 0; k <= nSeg; k++) nodes.push(interpAt(Math.min(totalM, k * step)));
 
-const segments = [];
+let segments = [];
 for (let k = 0; k < nSeg; k++) {
   const a = nodes[k], b = nodes[k + 1];
-  const len = haversine(a, b);
-  const gradePct = len > 0 ? ((b.ele - a.ele) / len) * 100 : 0;
+  // 長度先取弦長：閉環恆等式 Σ t̂ᵢΔsᵢ = 0 要求 t̂ᵢ·Δsᵢ 等於位移向量，
+  // 而位移向量就是弦。之後再把全部弦長等比放大到軌跡總長，補回弦/弧缺口
+  // —— 等比縮放不會破壞「向量和為零」，兩個性質可以同時成立。
+  const chordM = haversine(a, b);
+  const gradePct = chordM > 0 ? ((b.ele - a.ele) / chordM) * 100 : 0;
 
   // 這段路內所有原始點的移動速度中位數
   const vs = [];
@@ -220,7 +226,7 @@ for (let k = 0; k < nSeg; k++) {
     i: k,
     s0: +(k * step).toFixed(1),
     s1: +((k + 1) * step).toFixed(1),
-    len: +len.toFixed(2),
+    len: +chordM.toFixed(3),
     lat: +((a.lat + b.lat) / 2).toFixed(6),
     lon: +((a.lon + b.lon) / 2).toFixed(6),
     a: [+a.lat.toFixed(6), +a.lon.toFixed(6)],
@@ -234,6 +240,54 @@ for (let k = 0; k < nSeg; k++) {
     obsPowerW: pMed === null ? null : Math.round(pMed),
     obsHr: hMed === null ? null : Math.round(hMed),
   });
+}
+
+// ---------- 弦長等比放大到軌跡總長 ----------
+// 重取樣的弦長總和略短於沿軌跡距離（25 m 間距約差 0.34%）。等比放大讓總距離
+// 正確，同時保留 Σ t̂ᵢΔsᵢ = 0（對零向量等比縮放仍是零向量）。
+{
+  const sumChord = segments.reduce((a, s) => a + s.len, 0);
+  const scale = totalM / sumChord;
+  need(scale > 1 && scale < 1.05,
+    '弦長放大倍率 ' + scale.toFixed(5) + ' 超出合理範圍，重取樣或軌跡有異常');
+  for (const s of segments) s.len = +(s.len * scale).toFixed(3);
+  console.log('弦長校正   Σ弦 ' + (sumChord / 1000).toFixed(3) + ' km -> ' +
+              (totalM / 1000).toFixed(3) + ' km（×' + scale.toFixed(5) + '）');
+}
+
+// ---------- 旋轉起終點 ----------
+// 閉環路線的「起點」只是約定，可以任意選。sections.json 的 startAtKm 以
+// 原始 GPX 里程指定新起點，旋轉後所有 km 都以新起點為 0，sections.json 的
+// section / waypoint 也一律使用旋轉後的里程。
+let rotatedFromKm = 0;
+{
+  let startAtKm = 0;
+  const secFile = resolve(ROOT, 'data/sections.json');
+  if (existsSync(secFile)) {
+    try {
+      const spec = JSON.parse(readFileSync(secFile, 'utf8'));
+      if (spec.startAtKm !== undefined) {
+        need(Number.isFinite(spec.startAtKm) && spec.startAtKm >= 0 && spec.startAtKm < totalM / 1000,
+          'sections.json 的 startAtKm = ' + JSON.stringify(spec.startAtKm) +
+          '，必須介於 0 與路線總長 ' + (totalM / 1000).toFixed(2) + ' km 之間');
+        startAtKm = spec.startAtKm;
+      }
+    } catch (e) { die('讀取 data/sections.json 失敗：' + e.message); }
+  }
+  if (startAtKm > 0) {
+    const rot = Math.round(startAtKm * 1000 / step) % nSeg;
+    need(rot > 0, 'startAtKm ' + startAtKm + ' km 四捨五入後落在第 0 段，等於沒有旋轉');
+    const before = segments[rot].a.slice();
+    segments = segments.slice(rot).concat(segments.slice(0, rot));
+    segments.forEach((s, k) => {
+      s.i = k;
+      s.s0 = +(k * step).toFixed(1);
+      s.s1 = +((k + 1) * step).toFixed(1);
+    });
+    rotatedFromKm = startAtKm;
+    console.log('起終點旋轉   原 km ' + startAtKm.toFixed(2) + ' -> 新 km 0.00   ' +
+                '（第 ' + rot + ' 段，' + before[0].toFixed(5) + ', ' + before[1].toFixed(5) + '）');
+  }
 }
 
 // 山區段形態學閉合：填補被短平路打斷的山區，避免分類碎片化
@@ -302,6 +356,7 @@ const out = {
     eleMin: +Math.min(...segments.map((s) => s.ele)).toFixed(1),
     eleMax: +Math.max(...segments.map((s) => s.ele)).toFixed(1),
     gpxOrientation,
+    rotatedFromKm,
     enclosedAreaKm2: +areaKm2.toFixed(2),
     closeGapM: +closeGap.toFixed(1),
     closureErrM: +closureErrM.toFixed(2),

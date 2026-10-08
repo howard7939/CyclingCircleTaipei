@@ -118,6 +118,7 @@
     $('vCCW').textContent = ccw.timeMin.toFixed(1) + ' min';
     $('cellCW').classList.toggle('win', better === 'CW');
     $('cellCCW').classList.toggle('win', better === 'CCW');
+    syncViewing();
   }
 
   // ---------- 圖例 ----------
@@ -240,15 +241,23 @@
     S.casing.addLayer(L.polyline(segs.map((s) => s.a).concat([segs[segs.length - 1].b]),
       { color: '#fff', weight: 7, opacity: .95, lineCap: 'round', interactive: false }));
 
+    // 2630 段逐段畫成 polyline 會讓瀏覽器很吃力。依 displayStride 把相鄰數段
+    // 併成一條繪製（計算仍用全解析度，只有「畫」被抽稀）。
     S.segLayer = L.layerGroup().addTo(S.map);
-    S.lines = segs.map((s, i) => {
-      const pl = L.polyline([s.a, s.b], { color: '#999', weight: 4, lineCap: 'butt', bubblingMouseEvents: false });
-      pl.on('mouseover', () => { showSeg(i); pl.setStyle({ weight: 8 }); });
+    const stride = S.stride;
+    S.lines = []; S.lineIdx = [];
+    for (let i = 0; i < segs.length; i += stride) {
+      const grp = segs.slice(i, i + stride);
+      const pts = grp.map((s) => s.a).concat([grp[grp.length - 1].b]);
+      const mid = i + Math.floor(grp.length / 2);
+      const pl = L.polyline(pts, { color: '#999', weight: 4, lineCap: 'butt', bubblingMouseEvents: false });
+      pl.on('mouseover', () => { showSeg(mid); pl.setStyle({ weight: 8 }); });
       pl.on('mouseout', () => { pl.setStyle({ weight: 4 }); clearCursor(); });
-      pl.on('click', () => L.popup({ maxWidth: 320 }).setLatLng([s.lat, s.lon]).setContent(tipHtml(i)).openOn(S.map));
+      pl.on('click', () => L.popup({ maxWidth: 330 }).setLatLng([segs[mid].lat, segs[mid].lon])
+        .setContent(tipHtml(mid)).openOn(S.map));
       S.segLayer.addLayer(pl);
-      return pl;
-    });
+      S.lines.push(pl); S.lineIdx.push(mid);
+    }
 
     S.arrowLayer = L.layerGroup().addTo(S.map);
     S.stationLayer = L.layerGroup();
@@ -257,26 +266,49 @@
   }
 
   function renderMap() {
-    S.lines.forEach((pl, i) => pl.setStyle({ color: segColor(i), weight: 4 }));
+    S.lines.forEach((pl, k) => pl.setStyle({ color: segColor(S.lineIdx[k]), weight: 4 }));
 
-    // 風向箭頭：沿路線等距擺放，方向為風「吹向」
+    // 風向箭頭：直接畫在 Open-Meteo 的「取樣點」上，而不是沿路線等距亂擺 ——
+    // 這樣箭頭的位置就等於風場資料的真實來源，hover 可以看到該點的原始值。
     S.arrowLayer.clearLayers();
-    const segs = S.route.segments, step = Math.round(segs.length / 14);
-    for (let i = Math.floor(step / 2); i < segs.length; i += step) {
-      const s = segs[i], c = S.cond.segments[i];
-      const toDeg = (c.openWindFromDeg + 180) % 360;
-      const len = 0.004 + 0.0014 * c.openWindMs;
+    const samples = S.cond.wind.samples || [];
+    const cellColor = new Map();
+    const palette = ['#2a78d6', '#eb6834', '#1baf7a', '#4a3aa7', '#e87ba4', '#eda100'];
+    samples.forEach((p) => {
+      const key = p.gridLat + ',' + p.gridLon;
+      if (!cellColor.has(key)) cellColor.set(key, palette[cellColor.size % palette.length]);
+    });
+    samples.forEach((p, idx) => {
+      const toDeg = (p.fromDeg + 180) % 360;
+      const len = 0.006 + 0.0022 * p.windMs;
       const rad = toDeg * Math.PI / 180;
-      const dLat = len * Math.cos(rad), dLon = len * Math.sin(rad) / Math.cos(s.lat * Math.PI / 180);
-      const tail = [s.lat - dLat / 2, s.lon - dLon / 2], tip = [s.lat + dLat / 2, s.lon + dLon / 2];
-      const opt = { color: '#0b0b0b', weight: 2, opacity: .55, interactive: false };
-      S.arrowLayer.addLayer(L.polyline([tail, tip], opt));
+      const kLat = 1 / Math.cos(p.lat * Math.PI / 180);
+      const dLat = len * Math.cos(rad), dLon = len * Math.sin(rad) * kLat;
+      const tail = [p.lat - dLat / 2, p.lon - dLon / 2], tip = [p.lat + dLat / 2, p.lon + dLon / 2];
+      const col = cellColor.get(p.gridLat + ',' + p.gridLon);
+      const pts = [tail, tip];
       for (const sgn of [-1, 1]) {
-        const a = rad + Math.PI + sgn * 0.45, f = len * 0.34;
-        S.arrowLayer.addLayer(L.polyline([tip,
-          [tip[0] + f * Math.cos(a), tip[1] + f * Math.sin(a) / Math.cos(s.lat * Math.PI / 180)]], opt));
+        const a = rad + Math.PI + sgn * 0.42, f = len * 0.33;
+        pts.push(tip, [tip[0] + f * Math.cos(a), tip[1] + f * Math.sin(a) * kLat]);
       }
-    }
+      const tipHtmlArrow =
+        '<div class="tip"><div class="h">風場取樣點 ' + (idx + 1) + '/' + samples.length +
+        '（' + (p.name || '') + '）</div><table>' +
+        '<tr><td>風速</td><td>' + p.windMs.toFixed(2) + ' m/s</td></tr>' +
+        '<tr><td>風向（來向）</td><td>' + p.fromDeg.toFixed(0) + '°</td></tr>' +
+        '<tr><td>陣風</td><td>' + (p.gustMs == null ? '—' : p.gustMs.toFixed(1) + ' m/s') + '</td></tr>' +
+        '<tr><td>查詢座標</td><td>' + p.lat.toFixed(4) + ', ' + p.lon.toFixed(4) + '</td></tr>' +
+        '<tr><td>模式格點</td><td>' + p.gridLat.toFixed(3) + ', ' + p.gridLon.toFixed(3) + '</td></tr>' +
+        '<tr><td>格點高程</td><td>' + p.gridElevM + ' m</td></tr>' +
+        '</table><div style="margin-top:4px;color:#898781">同色箭頭＝同一個模式格點</div></div>';
+      // 粗透明線當作好按的熱區，細線負責外觀
+      const hit = L.polyline(pts, { color: col, weight: 14, opacity: 0 });
+      const vis = L.polyline(pts, { color: col, weight: 2.4, opacity: .85, interactive: false });
+      hit.bindTooltip(tipHtmlArrow, { direction: 'top', sticky: true, opacity: .97 });
+      S.arrowLayer.addLayer(vis); S.arrowLayer.addLayer(hit);
+      S.arrowLayer.addLayer(L.circleMarker([p.lat, p.lon],
+        { radius: 2.6, color: col, weight: 1.5, fillColor: '#fff', fillOpacity: 1, interactive: false }));
+    });
 
     S.stationLayer.clearLayers();
     for (const st of (S.cond.stations || [])) {
@@ -519,8 +551,46 @@
     $('hdrTime').textContent = '更新於 ' + new Date(c.generatedAt).toLocaleTimeString('zh-TW', { hour12: false });
   }
 
+  // ---------- 方向檢視切換 ----------
+  function syncViewing() {
+    $('cellCW').classList.toggle('viewing', S.mode === 'windCW');
+    $('cellCCW').classList.toggle('viewing', S.mode === 'windCCW');
+  }
+  function setMode(m) {
+    S.mode = m;
+    for (const b of $('modes').children) b.setAttribute('aria-pressed', String(b.dataset.mode === m));
+    syncViewing(); renderLegend(); renderMap(); renderProfile();
+  }
+
+  // ---------- 名詞說明 ----------
+  function renderHelp() {
+    const w = S.cond.wind, D = S.cond.direction.exposureDisplacement;
+    $('windHelp').innerHTML =
+      '<b>開闊地風</b>　沿路線等距取 ' + w.sampleCount + ' 點查 Open-Meteo 的 10 m 風，' +
+      '以 u/v 分量向量平均（絕不平均角度）。模式輸出代表無遮蔽的開闊地。<br>' +
+      '<b>測站向量平均</b>　氣象署路線周邊 ' + w.stationCount + ' 個海拔 &lt;200 m 的測站，' +
+      '各自分解成 u/v 後平均。<br>' +
+      '<b>遮蔽比 ' + w.shelterRatio + '×</b>　開闊地風 ÷ 測站「純量」平均風速。' +
+      '大於 1 代表測站受樹木建物遮蔽而讀低；此值就是把開闊地風折減成市區風的經驗佐證。<br>' +
+      '<b>|D| 加權位移 ' + D.magnitudeKm + ' km</b>　D = Σ kᵢ·t̂ᵢ·Δsᵢ，把每一小段的行進方向' +
+      '用曝露度係數加權後相加。閉環使 Σt̂Δs=0，所以 D 只取決於 k 的<b>差值</b>。' +
+      '時間差正比於 W·D。<br>' +
+      '<b>臨界風向 ' + D.criticalFromDeg.map((x) => x.toFixed(0) + '°').join(' / ') + '</b>　' +
+      'W 與 D 垂直之處，兩個方向等價。風從 ' + D.ccwCenterFromDeg.toFixed(0) + '° 來時最該逆時針，' +
+      '從 ' + D.cwCenterFromDeg.toFixed(0) + '° 來時最該順時針。';
+
+    $('arrowHelp').innerHTML =
+      '箭頭畫在 Open-Meteo 的 <b>' + w.sampleCount + ' 個取樣點</b>上（沿路線等距），' +
+      '指向風「吹往」的方向，長度隨風速。<br>' +
+      '這些取樣點實際只落在 <b>' + w.gridCells + ' 個不同的模式格點</b>（格距約 8 km），' +
+      '同色箭頭＝同一格點。所以真正的獨立風場分區只有 ' + w.gridCells + ' 區，' +
+      '其餘是 IDW（power=2）內插的結果 —— 這也是為什麼模型解析不出河谷槽化。<br>' +
+      '計算時再由這 ' + w.sampleCount + ' 點內插到全部 ' + S.route.segments.length + ' 個路段。' +
+      '滑鼠移到箭頭可看該點原始值。';
+  }
+
   function renderAll() {
-    renderVerdict(); renderLegend(); renderCompass();
+    renderVerdict(); renderLegend(); renderCompass(); renderHelp();
     renderMap(); renderProfile(); renderTable(); renderMeta();
   }
 
@@ -547,17 +617,19 @@
                    kr: cur.exposureK.riverside, ku: cur.exposureK.urban, km_: cur.exposureK.mountain };
     applyDefaults();
 
+    S.stride = 1;
+    const probe = await getJson('/api/conditions?full=1&' + paramQuery().replace('full=1&',''), '取得騎乘條件');
+    S.cond = probe; S.stride = probe.displayStride || 1;
     initMap();
-    await refresh();
+    renderAll();
 
     // 互動
     $('modes').addEventListener('click', (ev) => {
       const b = ev.target.closest('button[data-mode]');
-      if (!b) return;
-      S.mode = b.dataset.mode;
-      for (const x of $('modes').children) x.setAttribute('aria-pressed', String(x === b));
-      renderLegend(); renderMap(); renderProfile();
+      if (b) setMode(b.dataset.mode);
     });
+    // 結論卡的兩欄也是方向切換鈕 —— 使用者直覺會先點那裡
+    for (const id of ['cellCW', 'cellCCW']) $(id).onclick = () => setMode($(id).dataset.dir);
 
     let timer = null;
     const onParam = () => { syncOutputs(); clearTimeout(timer); timer = setTimeout(refresh, 260); };

@@ -353,7 +353,7 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
 
   const result = {};
   for (const { key, sign } of dirs) {
-    let timeS = 0, distM = 0, aeroJ = 0, cappedM = 0;
+    let timeS = 0, distM = 0, aeroJ = 0, cappedM = 0, energyJ = 0;
     const byExposure = {};
     const perSeg = [];
 
@@ -380,7 +380,15 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
       const dAero = half * vApp * along * s.len;
       const dt = s.len / v;
 
-      timeS += dt; distM += s.len; aeroJ += dAero;
+      // 實際需要的功率。下坡觸及煞車上限時騎士是在煞車，不是輸出 P；
+      // 重力大於阻力時需要的功率甚至為負。照 P×t 計能量會高估做功。
+      const th = Math.atan(grade / 100);
+      const needW = (half * vApp * along
+                   + params.crr * params.massKg * 9.80665 * Math.cos(th)
+                   + params.massKg * 9.80665 * Math.sin(th)) * v;
+      const usedW = Math.max(0, Math.min(P, needW));
+
+      timeS += dt; distM += s.len; aeroJ += dAero; energyJ += usedW * dt;
       if (atCap) cappedM += s.len;
 
       const e = (byExposure[s.exposure] ||= { km: 0, timeS: 0, aeroJ: 0, hSum: 0, len: 0 });
@@ -397,7 +405,8 @@ export function analyzeDirections(segments, field, orientation, params = DEFAULT
     result[key] = {
       timeS: +timeS.toFixed(1),
       timeMin: +(timeS / 60).toFixed(2),
-      energyKJ: +(P * timeS / 1000).toFixed(1),
+      energyKJ: +(energyJ / 1000).toFixed(1),
+      avgPowerW: +(energyJ / timeS).toFixed(1),
       aeroWorkKJ: +(aeroJ / 1000).toFixed(1),
       avgSpeedKmh: +(distM / timeS * 3.6).toFixed(2),
       brakingCapKm: +(cappedM / 1000).toFixed(2),
