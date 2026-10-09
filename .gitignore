@@ -8,3 +8,8 @@ dist/
 # 靜態快照是產生物：GitHub Actions 每次重新產生並直接上傳為 Pages artifact，
 # 不需進版控。提交過時的快照只會製造雜訊與無謂的 diff。
 web/data/
+
+# 未裁切的原始騎乘紀錄：起點是住家，含出發/返家時間戳。
+# 公開 repo 不該放這些。route.gpx（已裁切成環線，起點為島頭公園）才是建置用的。
+Evening_*.gpx
+*_old.gpx
